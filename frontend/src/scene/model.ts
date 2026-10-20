@@ -63,17 +63,17 @@ export const PALETTE = {
 export const ROLE_COPY: Record<Role, { name: string; zone: string; summary: string }> = {
   red: {
     name: "Red Team",
-    zone: "Sandbox A",
+    zone: "The tester",
     summary: "Submits attacks and sees its own outcomes. Never sees findings or which defense acted.",
   },
   target: {
-    name: "Target LLM",
-    zone: "Simulated",
+    name: "Target",
+    zone: "System under test",
     summary: "Receives prompt text only. No attack labels, criteria, defenses or audit access.",
   },
   blue: {
     name: "Blue Team",
-    zone: "Sandbox B",
+    zone: "The defender",
     summary: "Reads redacted findings and applies rules. Never sees attack prompts.",
   },
 };

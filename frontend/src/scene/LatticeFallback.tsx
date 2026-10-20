@@ -68,7 +68,7 @@ export function LatticeFallback({ stage, data, highlight }: { stage: SceneStage;
       <polygon points={points(hexagon(810, 210, 22))} fill="#5d6b47" />
       <g fontFamily="JetBrains Mono, monospace" fontSize="11" letterSpacing="1.5" fill={PALETTE.bone}>
         <text x="150" y="122" textAnchor="middle">RED TEAM</text>
-        <text x="480" y="100" textAnchor="middle">TARGET LLM</text>
+        <text x="480" y="100" textAnchor="middle">TARGET</text>
         <text x="810" y="122" textAnchor="middle">BLUE TEAM</text>
       </g>
     </svg>

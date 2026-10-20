@@ -2,10 +2,12 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { href } from "../hooks";
 import { useLab } from "../lab";
-import { STAGE_INFO, stageMetric } from "./ui";
+import { PLAIN_STAGE, stageResult } from "../explain";
 
 export const NAV = [
   { path: "", label: "Overview" },
+  { path: "how", label: "How it works" },
+  { path: "demo", label: "Guided demo" },
   { path: "runs", label: "Test runs" },
   { path: "attacks", label: "Attack library" },
   { path: "isolation", label: "Isolation lab" },
@@ -79,7 +81,9 @@ function SystemStatus() {
       </div>
       <div className="flex justify-between gap-3">
         <dt>Target</dt>
-        <dd className="text-amber-300">simulated</dd>
+        <dd className={!meta ? "" : meta.target?.kind === "unknown" ? "text-rust-300" : meta.target?.kind === "simulated" ? "text-amber-300" : "text-bone-200"}>
+          {meta ? (meta.target?.kind ?? "not reported") : "…"}
+        </dd>
       </div>
       <div className="flex justify-between gap-3">
         <dt>Storage</dt>
@@ -99,7 +103,7 @@ function SystemStatus() {
         <dt>Run</dt>
         <dd className={busy ? "flex items-center gap-1.5 text-moss-300" : "text-bone-200"}>
           {busy && <span className="live-dot size-1 bg-moss-300" aria-hidden />}
-          {busy ? (playing ? STAGE_INFO[playing].title : "starting") : "idle"}
+          {busy ? (playing ? PLAIN_STAGE[playing].name : "starting") : "idle"}
         </dd>
       </div>
     </dl>
@@ -108,7 +112,7 @@ function SystemStatus() {
 
 export function Shell({ active, children }: { active: string; children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { busy, playing, error, run } = useLab();
+  const { busy, playing, error, run, dismiss } = useLab();
 
   useEffect(() => {
     document.body.style.overflow = menuOpen ? "hidden" : "";
@@ -121,9 +125,9 @@ export function Shell({ active, children }: { active: string; children: ReactNod
   // Announced to assistive technology on every page as the backend executes stages.
   const announcement =
     busy && playing && run
-      ? `${STAGE_INFO[playing].title} stage executed. ${stageMetric(run, playing) ?? ""}`
+      ? `Step “${PLAIN_STAGE[playing].name}” finished. ${stageResult(run, playing)?.text ?? ""}`
       : !busy && run?.report
-        ? `Run complete. Residual risk ${run.report.overall_risk}.`
+        ? `Run complete. Highest remaining risk: ${run.report.overall_risk}.`
         : "";
 
   return (
@@ -138,12 +142,7 @@ export function Shell({ active, children }: { active: string; children: ReactNod
           <Wordmark />
           <NavLinks active={active} />
         </div>
-        <div className="space-y-5">
-          <SystemStatus />
-          <p className="text-[11.5px] leading-snug text-bone-500">
-            Results come from a deterministic simulator, not a real model.
-          </p>
-        </div>
+        <SystemStatus />
       </aside>
 
       {/* Mobile bar */}
@@ -175,8 +174,11 @@ export function Shell({ active, children }: { active: string; children: ReactNod
         </p>
         {busy && <div key={playing ?? "start"} className="sweep no-print fixed top-0 right-0 left-0 z-40 h-px bg-moss-400 lg:left-[236px]" />}
         {error && (
-          <div role="alert" className="border-b border-rust-500/40 bg-rust-900/60 px-4 py-2.5 text-[13px] text-rust-300 sm:px-8 lg:px-12">
-            {error}
+          <div role="alert" className="flex items-start justify-between gap-4 border-b border-rust-500/40 bg-rust-900/60 px-4 py-2.5 text-[13px] text-rust-300 sm:px-8 lg:px-12">
+            <span>{error}</span>
+            <button type="button" className="label shrink-0 text-rust-300 hover:text-bone-50" onClick={dismiss}>
+              Dismiss
+            </button>
           </div>
         )}
         <div className="mx-auto max-w-[1480px] px-4 pt-8 pb-24 sm:px-8 lg:px-12 lg:pt-12">{children}</div>

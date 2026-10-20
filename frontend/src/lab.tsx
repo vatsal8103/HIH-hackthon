@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api, type Meta, type RunDetail, type Stage } from "./api";
+import { PLAIN_STAGE } from "./explain";
 import { sleep, useReducedMotion } from "./hooks";
 
 // How long each executed stage is shown before the next one is requested.
@@ -19,14 +20,17 @@ const REDUCED_MS = 280;
 interface Lab {
   meta: Meta | null;
   online: boolean | null;
-  run: RunDetail | null; // the run shown in the security core
+  run: RunDetail | null; // the latest run: shown on the overview, in the security core and the demo
+  runLoad: "loading" | "ready" | "failed"; // whether `run === null` means "no runs" or "not known"
   playing: Stage | null; // stage whose animation is currently playing
   busy: boolean;
   error: string | null;
+  failed: { runId: string; stage: Stage } | null; // the stage the backend refused; the run can resume there
   version: number; // bumps whenever backend state changes, so pages refetch
   start: (attackIds?: string[]) => Promise<void>;
   resume: (id: string) => Promise<void>;
   skip: () => void;
+  dismiss: () => void;
 }
 
 const LabContext = createContext<Lab | null>(null);
@@ -42,9 +46,11 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [online, setOnline] = useState<boolean | null>(null);
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [runLoad, setRunLoad] = useState<Lab["runLoad"]>("loading");
   const [playing, setPlaying] = useState<Stage | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [failed, setFailed] = useState<Lab["failed"]>(null);
   const [version, setVersion] = useState(0);
   const fast = useRef(false);
   const busyRef = useRef(false);
@@ -57,7 +63,8 @@ export function LabProvider({ children }: { children: ReactNode }) {
     api
       .runs()
       .then((runs) => (runs[0] ? api.run(runs[0].id).then(setRun) : undefined))
-      .catch(() => undefined);
+      .then(() => setRunLoad("ready"))
+      .catch((err: Error) => (setRunLoad("failed"), setError(`Could not load the latest run: ${err.message}`)));
   }, []);
 
   // Advance the session one real backend stage at a time, showing each result.
@@ -65,12 +72,19 @@ export function LabProvider({ children }: { children: ReactNode }) {
     async (initial: RunDetail) => {
       let current = initial;
       setRun(current);
+      setRunLoad("ready");
       try {
         while (current.next_stage) {
-          const { executed, run: next, checkpoint } = await api.advance(current.id);
+          const stage = current.next_stage;
+          const { executed, run: next, checkpoint } = await api.advance(current.id).catch((err: unknown) => {
+            setFailed({ runId: current.id, stage });
+            throw err;
+          });
           if (checkpoint && (checkpoint.status === "failed" || checkpoint.status === "rejected")) {
             // The stage committed but its audit events are not externally anchored yet: say so.
-            setError(`Audit checkpoint ${checkpoint.status} after ${executed}: ${checkpoint.error ?? "witness error"}`);
+            setError(
+              `The step “${PLAIN_STAGE[executed].name}” was saved, but anchoring it with the witness ${checkpoint.status === "failed" ? "failed" : "was rejected"}: ${checkpoint.error ?? "witness error"}`,
+            );
           }
           current = next;
           setRun(next);
@@ -92,6 +106,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
     fast.current = false;
     setBusy(true);
     setError(null);
+    setFailed(null);
     try {
       await task();
     } catch (err) {
@@ -110,9 +125,10 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const skip = useCallback(() => {
     fast.current = true;
   }, []);
+  const dismiss = useCallback(() => setError(null), []);
 
   return (
-    <LabContext.Provider value={{ meta, online, run, playing, busy, error, version, start, resume, skip }}>
+    <LabContext.Provider value={{ meta, online, run, runLoad, playing, busy, error, failed, version, start, resume, skip, dismiss }}>
       {children}
     </LabContext.Provider>
   );

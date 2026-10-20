@@ -15,5 +15,7 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests run under node --test (Node strips types); the app config has no Node typings.
+  "exclude": ["src/**/*.test.ts"]
 }

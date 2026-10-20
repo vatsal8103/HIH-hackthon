@@ -1,7 +1,7 @@
 import { Component, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { RunDetail } from "../api";
-import { STAGE_INFO, stageMetric } from "../components/ui";
+import { PLAIN_STAGE, stageResult } from "../explain";
 import { useReducedMotion } from "../hooks";
 import { useLab } from "../lab";
 import { LatticeFallback } from "./LatticeFallback";
@@ -35,13 +35,13 @@ class SceneBoundary extends Component<{ fallback: ReactNode; children: ReactNode
 function readout(run: RunDetail | null, stage: SceneStage, playing: boolean): string {
   if (!run) return "No runs yet";
   if (playing && stage !== "idle" && stage !== "created") {
-    return `${STAGE_INFO[stage].title} · ${stageMetric(run, stage) ?? STAGE_INFO[stage].actor}`;
+    return `${PLAIN_STAGE[stage].name} · ${stageResult(run, stage)?.text ?? PLAIN_STAGE[stage].who}`;
   }
   if (run.report) {
     const { counts, audit } = run.report;
-    return `${counts.residual_failures}/${counts.cases} residual · ${run.defenses.length} rules · chain ${audit.ok ? "intact" : "broken"}`;
+    return `${counts.residual_failures} of ${counts.cases} still failing · ${run.defenses.length} protections · record ${audit.ok ? "intact" : "broken"}`;
   }
-  return `Paused after ${run.stage}`;
+  return `Paused after ${run.stage === "created" ? "start" : PLAIN_STAGE[run.stage].name}`;
 }
 
 export function SecurityCore({ run, stage, playing }: { run: RunDetail | null; stage: SceneStage; playing: boolean }) {

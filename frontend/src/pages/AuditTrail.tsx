@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api, type CheckpointVerification, type TamperMode, type TamperResult, type Verification } from "../api";
+import { api, type TamperMode, type TamperResult, type Verification } from "../api";
+import { Help, Technical } from "../components/Explain";
 import { Note, PageHead, SectionHead, groupHash, time } from "../components/ui";
+import { TONE_TEXT, checkpointPlain, eventPlain } from "../explain";
 import { sleep, useLoad, useReducedMotion } from "../hooks";
 import { useLab } from "../lab";
 
@@ -15,47 +17,44 @@ const TAMPER_MODES: { mode: TamperMode; label: string; description: string }[] =
   { mode: "rewrite", label: "Rewrite the chain", description: "Edit an event and recompute every later hash." },
 ];
 
+const SHOWN_ERRORS = 12;
+
+/** What a verifier response says, in order of importance: verdict, discrepancies, witness, head. */
 function VerificationResult({ result, title }: { result: Verification; title: string }) {
+  const anchor = result.checkpoint ? checkpointPlain(result.checkpoint) : null;
   return (
-    <div className="fade-in">
-      <div className="flex items-baseline justify-between gap-4">
+    <div className="fade-in space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <p className="label">{title}</p>
-        <p className={`font-mono text-[12px] uppercase ${result.ok ? "text-moss-300" : "text-rust-300"}`}>
-          {result.ok ? "intact" : `${result.errors.length} error${result.errors.length === 1 ? "" : "s"}`}
+        <p className={`text-[15px] font-medium ${result.ok ? "text-moss-300" : "text-rust-300"}`}>
+          {result.ok ? "Intact" : `${result.errors.length} problem${result.errors.length === 1 ? "" : "s"} found`}
         </p>
       </div>
-      <p className="mt-2 text-[13px] text-bone-400">{result.checked} events checked in stored order.</p>
-      {result.checkpoint && <CheckpointLine checkpoint={result.checkpoint} />}
+      <p className="text-[13.5px] text-bone-400">
+        {result.ok
+          ? `${result.checked} entries checked in order: every link and fingerprint matches.`
+          : `${result.checked} entries checked in order: something was changed, removed or moved. The list below says where.`}
+      </p>
+      {anchor && (
+        <p className={`text-[13.5px] leading-relaxed ${TONE_TEXT[anchor.tone]}`}>
+          Witness: {anchor.label}. <span className="text-bone-400">{anchor.sentence}</span>
+        </p>
+      )}
       {result.errors.length > 0 && (
-        <ul className="mt-3 space-y-1.5">
-          {result.errors.slice(0, 6).map((error, i) => (
+        <ul className="space-y-1.5">
+          {result.errors.slice(0, SHOWN_ERRORS).map((error, i) => (
             <li key={i} className="font-mono text-[11.5px] leading-relaxed text-rust-300">
               {error.seq !== null && `#${error.seq} · `}
               {error.kind} · <span className="text-bone-400">{error.message}</span>
             </li>
           ))}
+          {result.errors.length > SHOWN_ERRORS && (
+            <li className="font-mono text-[11.5px] text-bone-500">…and {result.errors.length - SHOWN_ERRORS} more</li>
+          )}
         </ul>
       )}
     </div>
   );
-}
-
-/** External checkpoint status, stated plainly: anchored, broken, unreachable or absent. */
-function CheckpointLine({ checkpoint }: { checkpoint: CheckpointVerification }) {
-  const text: Record<CheckpointVerification["status"], string> = {
-    ok: `Witness: chain matches all ${checkpoint.checkpoints} checkpoints, anchored through #${checkpoint.anchored_seq}${
-      checkpoint.unanchored_events ? ` (${checkpoint.unanchored_events} newer events not yet anchored)` : ""
-    }.`,
-    mismatch: `Witness: the stored chain disagrees with external checkpoints.${
-      checkpoint.superseded?.length
-        ? ` ${checkpoint.superseded.length} checkpoint(s) were superseded in an operator recovery; their mismatches stay listed.`
-        : ""
-    }`,
-    unavailable: "Witness unreachable: external verification could not run.",
-    "not-configured": "No witness in this deployment: a full rewrite of the local chain would go undetected.",
-  };
-  const tone = checkpoint.status === "ok" ? "text-moss-300" : checkpoint.status === "not-configured" ? "text-amber-300" : "text-rust-300";
-  return <p className={`mt-2 text-[13px] leading-relaxed ${tone}`}>{text[checkpoint.status]}</p>;
 }
 
 export function AuditTrail() {
@@ -63,12 +62,45 @@ export function AuditTrail() {
   const reducedMotion = useReducedMotion();
   const { data: events, error } = useLoad(() => api.audit(60), [version]);
   const [verification, setVerification] = useState<Verification | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [walked, setWalked] = useState(-1);
   const [verifying, setVerifying] = useState(false);
   const [tamper, setTamper] = useState<TamperResult | null>(null);
   const [tamperError, setTamperError] = useState<string | null>(null);
+  const [simulating, setSimulating] = useState<TamperMode | null>(null);
   const listRef = useRef<HTMLOListElement>(null);
   const tamperRef = useRef<HTMLDivElement>(null);
+
+  // Verification is read-only, so the page shows the real status as soon as it opens and after every run.
+  const verify = useCallback(
+    async (walk: number) => {
+      setVerifying(true);
+      setVerifyError(null);
+      setWalked(-1);
+      try {
+        setVerification(await api.verify());
+        // The server verified the whole chain; on request, walk the visible window to show each link being checked.
+        if (walk && !reducedMotion) {
+          const step = Math.min(45, 2200 / walk);
+          for (let i = 0; i < walk; i++) {
+            setWalked(i);
+            await sleep(step);
+          }
+        }
+        setWalked(Number.MAX_SAFE_INTEGER);
+      } catch (err) {
+        setVerification(null); // never leave an earlier "intact" on screen after a failed check
+        setVerifyError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setVerifying(false);
+      }
+    },
+    [reducedMotion],
+  );
+
+  useEffect(() => {
+    void verify(0);
+  }, [verify, version]);
 
   // Keep the newest link in view as the chain grows during a run.
   useEffect(() => {
@@ -85,35 +117,17 @@ export function AuditTrail() {
     tamperRef.current?.scrollIntoView({ block: "nearest", behavior });
   }, [tamper, reducedMotion]);
 
-  const verify = async () => {
-    if (!events) return;
-    setVerifying(true);
-    setTamper(null);
-    setWalked(-1);
-    try {
-      const result = await api.verify();
-      setVerification(result);
-      // The server verified the whole chain; walk the visible window to show each link being checked.
-      if (!reducedMotion) {
-        const step = Math.min(45, 2200 / Math.max(events.length, 1));
-        for (let i = 0; i < events.length; i++) {
-          setWalked(i);
-          await sleep(step);
-        }
-      }
-      setWalked(events.length);
-    } finally {
-      setVerifying(false);
-    }
-  };
-
   const simulate = async (mode: TamperMode) => {
+    setSimulating(mode);
     setTamperError(null);
     try {
       // Target the middle of the visible window so the affected block can be highlighted.
       setTamper(await api.tamper(mode, events?.[Math.floor(events.length / 2)]?.seq));
     } catch (err) {
+      setTamper(null);
       setTamperError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSimulating(null);
     }
   };
 
@@ -122,22 +136,65 @@ export function AuditTrail() {
 
   return (
     <div className="space-y-12">
-      <PageHead eyebrow="Audit trail" title="Evidence, chained.">
-        Every action is appended with the previous event's hash and a SHA-256 of its own fields. Target and evaluator
-        events also carry digests of the stored prompt, response and verdict they refer to.
+      <PageHead eyebrow="Audit trail" title="A record that shows if it was changed.">
+        Every step of every test is written here in order. Each entry links to the one before it, so an unexpected edit,
+        deletion or reordering breaks the chain and verification says so. This is tamper detection, not tamper-proofing.
+        <Help term="a hash chain">
+          Each entry stores the previous entry's fingerprint (its SHA-256 hash) and a fingerprint of its own fields. Target
+          and evaluator entries also carry fingerprints of the stored prompt, answer and verdict, so changing the evidence
+          itself is caught too. Where a witness service is configured, it keeps checkpoints of the latest fingerprint, which
+          catch even a complete rewrite of anything checkpointed.
+        </Help>
       </PageHead>
+
+      <section aria-live="polite">
+        <SectionHead
+          index="01"
+          title="Verification status"
+          aside={
+            <button
+              type="button"
+              className="label hover:text-bone-200 disabled:opacity-40"
+              disabled={verifying}
+              onClick={() => verify(events?.length ?? 0)}
+            >
+              {verifying ? "Verifying…" : "Verify again →"}
+            </button>
+          }
+        />
+        <div className="pt-5">
+          {verifyError ? (
+            <Note tone="error">
+              Verification could not run: {verifyError}. Nothing is known about the record's state until it does.
+            </Note>
+          ) : verification ? (
+            <div className="grid gap-8 lg:grid-cols-12">
+              <div className="lg:col-span-8">
+                <VerificationResult result={verification} title="Stored record" />
+              </div>
+              <div className="lg:col-span-4">
+                <p className="label">Latest fingerprint (head hash)</p>
+                <p className="mt-2 font-mono text-[11.5px] leading-relaxed break-words text-bone-200">{groupHash(verification.head_hash)}</p>
+                <p className="mt-2 text-[12px] text-bone-500">This is the value the witness checkpoints.</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-[13.5px] text-bone-500">Verifying the stored record…</p>
+          )}
+        </div>
+      </section>
 
       {error && <Note tone="error">{error}</Note>}
 
       <div className="grid gap-12 lg:grid-cols-12">
         <section className="min-w-0 lg:col-span-7">
           <SectionHead
-            index="01"
-            title="Chain"
-            aside={<span className="label">{events ? `latest ${events.length} events` : "…"}</span>}
+            index="02"
+            title="The record · technical evidence"
+            aside={<span className="label">{events ? `latest ${events.length} entries` : "…"}</span>}
           />
-          {events?.length === 0 && <p className="py-8 text-[14px] text-bone-500">No events yet. Run a test to build the chain.</p>}
-          <ol ref={listRef} aria-label="Audit events, oldest first" className="max-h-[760px] overflow-y-auto pt-4 pr-1">
+          {events?.length === 0 && <p className="py-8 text-[14px] text-bone-500">No entries yet. Run a test to build the record.</p>}
+          <ol ref={listRef} aria-label="Audit entries, oldest first" className="max-h-[680px] overflow-y-auto pt-4 pr-1">
             {events?.map((event, i) => {
               const checked = walked >= i;
               const broken = errorSeqs.has(event.seq);
@@ -161,7 +218,8 @@ export function AuditTrail() {
                   >
                     <div className="flex items-baseline justify-between gap-3">
                       <p className="min-w-0 truncate text-[13.5px] text-bone-50">
-                        {event.event_type}
+                        {eventPlain(event.event_type)}
+                        <span className="ml-2 font-mono text-[10.5px] text-bone-500">{event.event_type}</span>
                         <span className={`ml-2 font-mono text-[10.5px] tracking-[0.1em] uppercase ${ACTOR_TEXT[event.actor] ?? "text-bone-500"}`}>
                           {event.actor}
                         </span>
@@ -189,69 +247,55 @@ export function AuditTrail() {
           </ol>
         </section>
 
-        <aside className="min-w-0 space-y-12 lg:sticky lg:top-10 lg:col-span-5 lg:self-start">
-          <section>
-            <SectionHead index="02" title="Verify the stored chain" />
-            <div className="space-y-5 pt-5">
-              <button type="button" className="btn btn-primary" onClick={verify} disabled={verifying || !events?.length}>
-                {verifying ? "Verifying…" : "Verify chain"}
+        <aside className="min-w-0 lg:sticky lg:top-10 lg:col-span-5 lg:self-start">
+          <SectionHead index="03" title="Tamper simulation" />
+          <p className="pt-4 text-[13px] leading-relaxed text-bone-400">
+            See what verification does when someone tampers with the record. Each simulation changes a temporary copy on the
+            server and verifies that copy. The stored record is never modified.
+          </p>
+          <div className="mt-5 grid grid-cols-1 gap-px bg-ink-700 sm:grid-cols-2">
+            {TAMPER_MODES.map(({ mode, label, description }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => simulate(mode)}
+                disabled={!events?.length || simulating !== null}
+                aria-busy={simulating === mode}
+                className={`bg-ink-950 p-4 text-left transition-colors hover:bg-ink-850 disabled:opacity-40 ${tamper?.mode === mode ? "bg-ink-850" : ""}`}
+              >
+                <span className="block text-[14px] text-bone-50">{simulating === mode ? "Simulating…" : label}</span>
+                <span className="mt-1 block text-[12px] leading-snug text-bone-500">{description}</span>
               </button>
-              {verification && <VerificationResult result={verification} title="Stored chain" />}
-              {verification && (
-                <div>
-                  <p className="label">Head hash · record this externally to anchor the chain</p>
-                  <p className="mt-2 max-w-sm font-mono text-[11.5px] leading-relaxed text-bone-200">{groupHash(verification.head_hash)}</p>
-                </div>
+            ))}
+          </div>
+          {tamperError && <p className="mt-4 text-[13px] text-rust-300">Simulation failed: {tamperError}</p>}
+          {tamper && (
+            <div key={`${tamper.mode}-${tamper.seq}`} ref={tamperRef} className="mt-6 scroll-mb-8 space-y-4">
+              <p className="text-[13.5px] leading-relaxed text-bone-200">{tamper.summary}</p>
+              <VerificationResult result={tamper.verification} title="Tampered copy" />
+              {tamper.checkpoint && (
+                <p className={`text-[13px] ${tamper.checkpoint.detected ? "text-moss-300" : "text-rust-300"}`}>
+                  Witness checkpoints:{" "}
+                  {tamper.checkpoint.detected
+                    ? `caught it (${tamper.checkpoint.errors.length} checkpointed entries differ).`
+                    : "no checkpointed entry was affected."}
+                </p>
+              )}
+              {tamper.mode === "rewrite" && (
+                <Note tone={tamper.checkpoint?.detected ? "neutral" : "warn"}>
+                  The record's own links still verify; only the latest fingerprint changed.{" "}
+                  {tamper.checkpoint
+                    ? "The external witness is what detects a full rewrite; entries after its latest checkpoint stay unprotected until the next one."
+                    : "No witness is configured here, so a full rewrite by someone with database control is undetectable."}
+                  <Technical summary="Fingerprints">
+                    <span className="font-mono text-[11px]">
+                      {tamper.original_head.slice(0, 16)} → <span className="text-amber-300">{tamper.tampered_head.slice(0, 16)}</span>
+                    </span>
+                  </Technical>
+                </Note>
               )}
             </div>
-          </section>
-
-          <section>
-            <SectionHead index="03" title="Tamper simulation" />
-            <p className="pt-4 text-[13px] leading-relaxed text-bone-400">
-              Each simulation mutates an in-memory copy of the chain on the server and verifies it. The stored chain is
-              never modified.
-            </p>
-            <div className="mt-5 grid grid-cols-1 gap-px bg-ink-700 sm:grid-cols-2">
-              {TAMPER_MODES.map(({ mode, label, description }) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => simulate(mode)}
-                  disabled={!events?.length}
-                  className={`bg-ink-950 p-4 text-left transition-colors hover:bg-ink-850 disabled:opacity-40 ${tamper?.mode === mode ? "bg-ink-850" : ""}`}
-                >
-                  <span className="block text-[14px] text-bone-50">{label}</span>
-                  <span className="mt-1 block text-[12px] leading-snug text-bone-500">{description}</span>
-                </button>
-              ))}
-            </div>
-            {tamperError && <p className="mt-4 text-[13px] text-rust-300">{tamperError}</p>}
-            {tamper && (
-              <div key={`${tamper.mode}-${tamper.seq}`} ref={tamperRef} className="mt-6 scroll-mb-8 space-y-4">
-                <p className="text-[13.5px] leading-relaxed text-bone-200">{tamper.summary}</p>
-                <VerificationResult result={tamper.verification} title="Tampered copy" />
-                {tamper.checkpoint && (
-                  <p className={`text-[13px] ${tamper.checkpoint.detected ? "text-moss-300" : "text-rust-300"}`}>
-                    Witness checkpoints:{" "}
-                    {tamper.checkpoint.detected
-                      ? `caught it (${tamper.checkpoint.errors.length} checkpointed events differ).`
-                      : "no checkpointed event was affected."}
-                  </p>
-                )}
-                {tamper.mode === "rewrite" && (
-                  <Note tone={tamper.checkpoint?.detected ? "neutral" : "warn"}>
-                    Local verification passes. Only the head hash changed:{" "}
-                    <span className="font-mono text-[11px] text-bone-200">{tamper.original_head.slice(0, 12)}</span> →{" "}
-                    <span className="font-mono text-[11px] text-amber-300">{tamper.tampered_head.slice(0, 12)}</span>.{" "}
-                    {tamper.checkpoint
-                      ? "The external witness is what detects a full rewrite; events after its latest checkpoint stay unprotected until the next one."
-                      : "No witness is configured here, so a full rewrite by someone with database control is undetectable."}
-                  </Note>
-                )}
-              </div>
-            )}
-          </section>
+          )}
         </aside>
       </div>
     </div>

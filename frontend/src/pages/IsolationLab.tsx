@@ -1,15 +1,20 @@
 import { useState } from "react";
 
 import { api, type ProbeRow } from "../api";
+import { Help, KindLegend } from "../components/Explain";
 import { KindTag, Note, PageHead, SectionHead, stagger } from "../components/ui";
+import { href } from "../hooks";
 import { useLab } from "../lab";
+
+// Which credential the backend used for each role's probes (from the probe rows).
+const CREDENTIAL = { "agent-signed": "agent-signed key", held: "credential held", none: "no credential" } as const;
 
 const ROLES: [string, string][] = [
   ["operator", "Lab supervisor"],
-  ["red", "Sandbox A"],
-  ["blue", "Sandbox B"],
-  ["target", "Simulated model"],
-  ["anonymous", "No token"],
+  ["red", "Red Team · tester"],
+  ["blue", "Blue Team · defender"],
+  ["target", "Target · system under test"],
+  ["anonymous", "No credential"],
 ];
 // Mirrors isolation.RESOURCES on the backend. Permissions here only label cells before probing.
 const RESOURCES = [
@@ -43,7 +48,9 @@ function Cell({ row, index, emphasis, onEnter }: CellProps) {
         <span className={`font-mono text-[12px] ${row.ok ? (allowed ? "text-moss-300" : "text-bone-400") : "text-rust-300"}`}>
           {row.status}
         </span>
-        <span className="font-mono text-[9px] tracking-[0.14em] text-bone-500 uppercase">{row.ok ? row.expected : "mismatch"}</span>
+        <span className="font-mono text-[9px] tracking-[0.14em] text-bone-500 uppercase">
+          {row.ok ? (allowed ? "allowed" : "refused") : `expected ${row.expected === "allow" ? "allowed" : "refused"}`}
+        </span>
       </div>
     </td>
   );
@@ -76,19 +83,28 @@ export function IsolationLab() {
   return (
     <div className="space-y-14">
       <PageHead eyebrow="Isolation lab" title="Who can reach what.">
-        The backend sends real requests to its own routes with each role's token and compares every status code with
-        the permission table. Probes use a session id that never exists, so allowed requests return 404 and change nothing.
+        The tester, the target and the defender must stay apart: the Red Team must not read the defender's notes, and the
+        Blue Team must not see the attacks. This page checks those walls with real requests.
+        <Help term="the permission matrix">
+          Each cell is one real request from a role to one part of the system. The backend compares the answer with its
+          permission table: a 2xx or 404 means the door opened, 401 or 403 means it stayed shut. Probes use a session id
+          that never exists, so an allowed request changes nothing. Each role is probed only with a credential it really
+          has (shown under its name after probing). A role with no credential, like the Docker target, is expected to be
+          refused everywhere, even where the permission table grants it access.
+        </Help>
       </PageHead>
 
       <Note tone="warn">
-        Scope: these probes test application-layer authorisation inside one backend process. They do not test
-        operating-system, container or network isolation, which this prototype does not enforce.
+        Scope: the matrix below tests application-level permissions in the backend.{" "}
+        {meta && Object.values(meta.deployment.roles).every((mode) => mode === "agent")
+          ? "Container and network separation are checked separately: by the agents during every run (ISO-06, ISO-07 below) and, independently, by the Docker integration suite from outside the containers."
+          : "In this local setup the roles run inside one process, so there is no container or network separation here; the Docker version adds it."}
       </Note>
 
       <section>
         <SectionHead
           index="01"
-          title="Permission matrix"
+          title={rows ? "Permission matrix · observed" : "Permission matrix · expected"}
           aside={
             rows && (
               <span className={`label ${mismatches ? "text-rust-300" : "text-moss-300"}`}>
@@ -101,11 +117,14 @@ export function IsolationLab() {
           <button type="button" className="btn btn-primary" onClick={probe} disabled={probing}>
             {probing ? "Probing…" : rows ? "Probe again" : "Run 40 live probes"}
           </button>
-          {error && <span className="text-[13px] text-rust-300">{error}</span>}
-          {!rows && !error && <span className="text-[13px] text-bone-500">Until probed, cells show what the policy expects.</span>}
+          {error && <span className="text-[13px] text-rust-300">Probing failed: {error}</span>}
+          {!rows && !error && (
+            <span className="text-[13px] text-bone-500">Not probed yet: the cells show the permission table (what each role is granted).</span>
+          )}
           {rows && (
-            <span className="text-[13px] text-bone-400">
-              {allowed} allowed and {rows.length - allowed - mismatches} denied exactly as the policy states.
+            <span className={`text-[13px] ${mismatches ? "text-rust-300" : "text-bone-400"}`}>
+              Observed: {allowed} allowed and {rows.length - allowed - mismatches} refused exactly as expected
+              {mismatches ? `; ${mismatches} did not match` : ""}.
             </span>
           )}
         </div>
@@ -136,6 +155,7 @@ export function IsolationLab() {
                   <th scope="row" className="sticky left-0 z-10 bg-ink-950 pr-4 pl-4 text-left font-normal sm:pl-0">
                     <span className={`label block transition-colors ${pointer?.role === role ? "text-bone-50" : ""}`}>{role}</span>
                     <span className="block text-[11.5px] text-bone-500">{description}</span>
+                    {rows && <span className="block font-mono text-[10px] text-bone-500">{CREDENTIAL[find(role, RESOURCES[0].id)?.credential ?? "none"]}</span>}
                   </th>
                   {RESOURCES.map((resource, c) => {
                     const emphasis = pointer?.role === role || pointer?.resource === resource.id;
@@ -167,8 +187,12 @@ export function IsolationLab() {
       <section>
         <SectionHead index="02" title="Checks from the latest run" />
         {!run || run.isolation.length === 0 ? (
-          <p className="py-8 text-[14px] text-bone-500">Run a test to execute isolation checks.</p>
+          <p className="py-8 text-[14px] text-bone-500">
+            {run ? "The latest run stopped before its isolation step, so it has no checks yet." : "Run a test to execute isolation checks."}
+          </p>
         ) : (
+          <>
+          <KindLegend />
           <ul>
             {run.isolation.map((check, i) => (
               <li key={check.check_id} className="hairline reveal grid gap-2 border-b py-5 sm:grid-cols-[72px_1fr_112px] sm:gap-6" style={stagger(i)}>
@@ -184,29 +208,14 @@ export function IsolationLab() {
               </li>
             ))}
           </ul>
+          </>
         )}
       </section>
 
-      <section>
-        <SectionHead index="03" title="Control register" />
-        <div className="grid gap-px bg-ink-700 md:grid-cols-3">
-          {(["implemented", "simulated", "planned"] as const).map((status) => (
-            <div key={status} className="bg-ink-950 p-5 md:p-6">
-              <KindTag kind={status} />
-              <ul className="mt-5 space-y-5">
-                {meta?.controls
-                  .filter((control) => control.status === status)
-                  .map((control) => (
-                    <li key={control.name}>
-                      <p className="text-[14px] text-bone-50">{control.name}</p>
-                      <p className="mt-1 text-[12.5px] leading-relaxed text-bone-500">{control.detail}</p>
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      </section>
+      <p className="text-[13px] text-bone-500">
+        The full list of what is active, simulated or planned in this deployment is on{" "}
+        <a href={href("how")} className="text-bone-200 underline decoration-ink-500 underline-offset-4">How it works</a>.
+      </p>
     </div>
   );
 }

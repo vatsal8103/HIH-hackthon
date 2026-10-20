@@ -1,185 +1,422 @@
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
-import { STAGES, api } from "../api";
+import { STAGES, type Attempt, type RunCase, type RunDetail } from "../api";
+import { OutcomeTag, TargetNotice, Technical, guardLine, useRuleName } from "../components/Explain";
 import { OutcomeStrip } from "../components/Outcomes";
 import { Pipeline } from "../components/Pipeline";
-import { Hash, RiskTag, SectionHead, STAGE_INFO, dateTime, groupHash, riskText, shortId, stagger } from "../components/ui";
-import { href, useLoad } from "../hooks";
+import { Note, RiskTag, SectionHead, VerdictTag, dateTime, groupHash, shortId, stagger } from "../components/ui";
+import {
+  OUTCOME_MEANING,
+  PLAIN_STAGE,
+  RISK_PLAIN,
+  TONE_TEXT,
+  caseOutcome,
+  outcomeCounts,
+  refusedStage,
+  riskTone,
+  spotlightCase,
+} from "../explain";
+import { href, useReducedMotion } from "../hooks";
 import { useLab } from "../lab";
 import { SecurityCore } from "../scene/SecurityCore";
 import type { SceneStage } from "../scene/model";
 
 const capitalize = (word: string) => word[0].toUpperCase() + word.slice(1);
+const stoppedAfter = (run: RunDetail) => (run.stage === "created" ? "the start" : `“${PLAIN_STAGE[run.stage].name}”`);
+const textButton = "text-bone-200 underline decoration-ink-500 underline-offset-4 hover:decoration-bone-400";
 
-function Headline() {
+/** What Bayora does, the two actions, and the environment notice. */
+function Intro() {
   const { run, playing, busy, start, resume, skip } = useLab();
-  const report = run?.report;
-
-  let eyebrow = "No runs yet";
-  let word = "Ready";
-  let wordClass = "text-bone-50";
-  let sentence: ReactNode = "Run the suite to attack the simulated target, defend it through the Blue Team interface and retest.";
-  if (busy && playing) {
-    eyebrow = `Run in progress · stage 0${STAGES.indexOf(playing) + 1} of 07`;
-    word = STAGE_INFO[playing].title;
-    sentence = STAGE_INFO[playing].description;
-  } else if (busy) {
-    eyebrow = "Run in progress";
-    word = "Starting";
-    sentence = "Creating a session and recording it in the audit chain.";
-  } else if (report) {
-    eyebrow = "Residual risk · latest run";
-    word = capitalize(report.overall_risk);
-    wordClass = riskText(report.overall_risk);
-    sentence = (
-      <>
-        <span className="text-bone-50">
-          {report.counts.residual_failures} of {report.counts.cases} cases still fail
-        </span>{" "}
-        after Blue Team defenses. {report.counts.mitigated} of {report.counts.baseline_failures} baseline failures were
-        mitigated.
-      </>
-    );
-  } else if (run) {
-    eyebrow = "Interrupted run";
-    word = "Paused";
-    sentence = `This run stopped after the ${run.stage} stage. Resume to execute the remaining stages.`;
-  }
-
+  const paused = run && !run.report && !busy ? run : null;
   return (
     <div className="flex flex-col">
-      <p className="label reveal">{eyebrow}</p>
-      <p
-        key={word}
-        className={`reveal mt-4 font-serif text-[80px] leading-[0.84] tracking-[-0.02em] sm:text-[104px] ${wordClass}`}
-      >
-        {word}
+      <p className="label reveal">AI security testing lab</p>
+      <h1 className="reveal mt-4 font-serif text-[46px] leading-[0.95] tracking-[-0.015em] text-bone-50 sm:text-[68px]" style={stagger(1)}>
+        Can your AI withstand an attack?
+      </h1>
+      <p className="reveal mt-6 max-w-[32rem] text-[16px] leading-relaxed text-bone-400" style={stagger(2)}>
+        Bayora runs controlled security tests against AI systems, evaluates their responses, tests configured defenses,
+        and records evidence of what happened.
       </p>
-      <p className="reveal mt-5 max-w-[22rem] text-[15px] leading-relaxed text-bone-400" style={stagger(2)}>
-        {sentence}
-      </p>
-      <div className="reveal mt-7 flex flex-wrap items-center gap-3" style={stagger(3)}>
-        {busy ? (
-          <button type="button" className="btn" onClick={skip}>
-            Skip animation
-          </button>
-        ) : run && !report ? (
-          <button type="button" className="btn btn-primary" onClick={() => resume(run.id)}>
-            Resume run
-          </button>
-        ) : (
-          <button type="button" className="btn btn-primary" onClick={() => start()}>
-            Run test suite
-            <span aria-hidden>→</span>
-          </button>
-        )}
-        <a href={href("attacks")} className="btn">
-          Choose cases
+      <div className="reveal mt-8 flex flex-wrap items-center gap-3" style={stagger(3)}>
+        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => start()}>
+          {busy ? "Test running…" : "Run a security test"} <span aria-hidden>→</span>
+        </button>
+        <a href={href("how")} className="btn">
+          See how it works
         </a>
+      </div>
+      <p className="reveal mt-3 max-w-[32rem] text-[12.5px] leading-relaxed text-bone-500" style={stagger(3)} aria-live="polite">
+        {busy && playing ? (
+          <>
+            Running now · step {STAGES.indexOf(playing) + 1} of 7 · {PLAIN_STAGE[playing].name}.{" "}
+            <button type="button" className={textButton} onClick={skip}>
+              Skip the animation
+            </button>
+          </>
+        ) : busy ? (
+          "Starting a new test session…"
+        ) : paused ? (
+          <>
+            The latest run stopped after {stoppedAfter(paused)}.{" "}
+            <button type="button" className={textButton} onClick={() => resume(paused.id)}>
+              Resume it
+            </button>{" "}
+            to finish the remaining steps.
+          </>
+        ) : (
+          "Sends every attack in the library, step by step, in about 15 seconds. Each run is saved with its audit record."
+        )}
+      </p>
+      <TargetNotice className="reveal mt-7" />
+    </div>
+  );
+}
+
+function Stat({ label, value, tone = "text-bone-50", children }: { label: string; value: ReactNode; tone?: string; children: ReactNode }) {
+  return (
+    <div className="bg-ink-950 p-4 sm:p-5 lg:p-6">
+      <dt className="label">{label}</dt>
+      <dd className={`mt-3 font-serif text-[38px] leading-none sm:text-[44px] ${tone}`}>{value}</dd>
+      <dd className="mt-2.5 text-[12.5px] leading-snug text-bone-500">{children}</dd>
+    </div>
+  );
+}
+
+/** Four numbers from the run's recorded verdicts and its report, each with one short, non-overlapping note. */
+function Summary({ run }: { run: RunDetail }) {
+  const report = run.report!;
+  const counts = outcomeCounts(run.cases);
+  const passed = counts.fromStart + counts.afterProtection;
+  return (
+    <div>
+      <dl className="grid grid-cols-2 gap-px bg-ink-700 lg:grid-cols-4">
+        <Stat label="Attacks tested" value={counts.total}>
+          {report.counts.baseline_failures} worked before any protection.
+        </Stat>
+        <Stat label="Passed on retest" value={passed} tone="text-moss-300">
+          {counts.afterProtection
+            ? `${counts.afterProtection} only after a protection${counts.masked ? `; ${counts.masked} hidden, not fixed` : ""}.`
+            : "All of them passed from the start."}
+        </Stat>
+        <Stat label="Still vulnerable" value={counts.failing} tone={counts.failing ? "text-rust-300" : "text-bone-50"}>
+          {counts.failing ? "Failed the retry with protections in place." : "None failed the retry."}
+        </Stat>
+        <Stat label="Highest remaining risk" value={capitalize(report.overall_risk)} tone={TONE_TEXT[riskTone(report.overall_risk)]}>
+          {RISK_PLAIN[report.overall_risk]}
+        </Stat>
+      </dl>
+      <p className="mt-3 text-[12.5px] leading-relaxed text-bone-500">
+        Results of {counts.total} scripted test{counts.total === 1 ? "" : "s"} in a controlled lab. Passing them does not prove the AI is
+        safe against attacks that were not tried.
+      </p>
+    </div>
+  );
+}
+
+const LEGEND = (["stopped", "masked", "vulnerable"] as const).map((key) => OUTCOME_MEANING[key]);
+
+const VERDICT_TEXT = { pass: "text-moss-300", fail: "text-rust-300" } as const;
+
+/** First try, retry and remaining risk as text, from the run's recorded attempts and residual. */
+function AttemptLine({ item }: { item: RunCase }) {
+  const verdict = (attempt: RunCase["baseline"]) =>
+    attempt?.verdict ? <span className={VERDICT_TEXT[attempt.verdict]}>{attempt.verdict}</span> : "pending";
+  const risk = item.residual?.residual_risk;
+  // Spans the name and outcome columns; each "label value" pair stays together if it has to wrap.
+  return (
+    <span className="col-span-2 col-start-2 -mt-1 flex flex-wrap gap-x-2 font-mono text-[10.5px] text-bone-500">
+      <span className="whitespace-nowrap">first try {verdict(item.baseline)}</span>
+      <span aria-hidden>·</span>
+      <span className="whitespace-nowrap">retry {verdict(item.retest)}</span>
+      <span aria-hidden>·</span>
+      <span className="whitespace-nowrap">risk {risk ? <span className={TONE_TEXT[riskTone(risk)]}>{risk}</span> : "pending"}</span>
+    </span>
+  );
+}
+
+function CaseButton({ item, selected, onSelect, detail = false }: { item: RunCase; selected: boolean; onSelect: () => void; detail?: boolean }) {
+  const outcome = caseOutcome(item, useRuleName());
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className={`hairline grid w-full grid-cols-[52px_1fr_auto] items-baseline gap-3 border-b py-2.5 pl-2 text-left transition-colors ${
+        selected ? "bg-ink-850" : "hover:bg-ink-900"
+      }`}
+    >
+      <span className="font-mono text-[11px] text-bone-500">{item.attack.id}</span>
+      <span className="min-w-0 truncate text-[13.5px] text-bone-200">{item.attack.title}</span>
+      <span className="pr-2">
+        <OutcomeTag outcome={outcome} />
+      </span>
+      {detail && <AttemptLine item={item} />}
+    </button>
+  );
+}
+
+function RuleResult({ label, attempt, id }: { label: string; attempt: Attempt | null; id: string }) {
+  const result = attempt?.criteria?.find((c) => c.id === id);
+  if (!result) return <p>{label}: not recorded</p>;
+  return (
+    <p>
+      {label}:{" "}
+      <span className={result.passed ? "text-moss-300" : "text-rust-300"}>{result.passed ? "passed" : "failed"}</span>
+      {result.evidence ? ` · ${result.evidence}` : ""}
+    </p>
+  );
+}
+
+/** The selected finding in plain words, with the recorded evidence behind it one click away. */
+function Finding({ item }: { item: RunCase }) {
+  const ruleName = useRuleName();
+  const { meta } = useLab();
+  const outcome = caseOutcome(item, ruleName);
+  const broken = item.baseline?.criteria?.filter((c) => !c.passed) ?? [];
+  const risk = item.residual?.residual_risk;
+  const acted = item.retest ? guardLine(item.retest, ruleName) : null;
+  const rows: [string, ReactNode][] = [
+    ["What was tested", item.attack.technique],
+    ["What the attack tried", item.attack.objective],
+    [
+      "What the AI did first",
+      broken.length
+        ? `It broke ${broken.length === 1 ? "a safety rule" : `${broken.length} safety rules`}: ${broken
+            .map((c) => meta?.criteria[c.id]?.title ?? c.id)
+            .join("; ")}.`
+        : "It did not break any of the safety rules for this test.",
+    ],
+    ["Did the protection help?", outcome.sentence],
+    ["What to do next", item.residual?.recommendation ?? (risk ? RISK_PLAIN[risk] : "No report yet.")],
+  ];
+  return (
+    <article className="hairline border p-5 sm:p-8" aria-labelledby="finding-title">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <p className="label">Selected finding · {item.attack.id}</p>
+        <OutcomeTag outcome={outcome} />
+      </div>
+      <h3 id="finding-title" className="mt-3 font-serif text-[30px] leading-tight text-bone-50 sm:text-[34px]">
+        {item.attack.title}
+      </h3>
+      <dl className="mt-5 space-y-4">
+        {rows.map(([term, value]) => (
+          <div key={term} className="grid gap-1 sm:grid-cols-[170px_1fr] sm:gap-6">
+            <dt className="text-[12.5px] text-bone-500">{term}</dt>
+            <dd className="text-[14px] leading-relaxed text-bone-200">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <Technical summary="Technical evidence">
+        <dl className="space-y-2">
+          <div>
+            <dt className="text-bone-500">Verdicts</dt>
+            <dd>
+              First attempt <VerdictTag verdict={item.baseline?.verdict} /> · retry <VerdictTag verdict={item.retest?.verdict} /> ·
+              remaining risk <RiskTag risk={risk} />
+            </dd>
+          </div>
+          <div>
+            <dt className="text-bone-500">Protection that acted on the retry</dt>
+            <dd>{acted ?? "None recorded"}</dd>
+          </div>
+          <div>
+            <dt className="text-bone-500">Recorded reason</dt>
+            <dd>{item.residual?.rationale ?? "Not recorded"}</dd>
+          </div>
+        </dl>
+        <p className="mt-4 text-bone-500">Rule results</p>
+        <ul className="mt-1.5 space-y-3">
+          {item.attack.criteria.map((id) => (
+            <li key={id}>
+              <p className="text-bone-200">
+                {meta?.criteria[id]?.title ?? id} <span className="font-mono text-[10.5px] text-bone-500">{id}</span>
+              </p>
+              <RuleResult label="First attempt" attempt={item.baseline} id={id} />
+              <RuleResult label="Retry" attempt={item.retest} id={id} />
+            </li>
+          ))}
+        </ul>
+      </Technical>
+    </article>
+  );
+}
+
+/** The report's audit snapshot as a historical fact, kept apart from the current record. */
+function Evidence({ run }: { run: RunDetail }) {
+  const report = run.report!;
+  const audit = report.audit;
+  const witness =
+    audit.checkpoint === "ok"
+      ? `witness checkpoints covered entries up to #${audit.anchored_seq}`
+      : audit.checkpoint === "not-configured"
+        ? "no witness was configured"
+        : audit.checkpoint
+          ? `witness status: ${audit.checkpoint}`
+          : "witness status not recorded";
+  return (
+    <div className="space-y-2 text-[13.5px] leading-relaxed text-bone-400">
+      <p className="label">Evidence record</p>
+      <p>
+        <span className="text-bone-200">When the report was made</span> ({dateTime(report.generated_at)}): the record was{" "}
+        <span className={audit.ok ? "text-moss-300" : "text-rust-300"}>{audit.ok ? "intact" : "broken"}</span> across{" "}
+        {audit.checked} entries; {witness}.
+      </p>
+      <p>
+        <span className="text-bone-200">The current record</span> is not checked on this page.{" "}
+        <a href={href("audit")} className={textButton}>
+          Verify the current record →
+        </a>
+      </p>
+      <Technical summary="Head hash at report time">
+        <span className="font-mono text-[11px] break-words">{groupHash(audit.head_hash)}</span>
+      </Technical>
+    </div>
+  );
+}
+
+/** A finished run: the numbers, what needs attention (selectable), every attack (secondary), and the selected finding. */
+function CompletedRun({ run }: { run: RunDetail }) {
+  const attention = run.cases.filter((c) => ["vulnerable", "regressed", "masked"].includes(caseOutcome(c).key));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = run.cases.find((c) => c.attack.id === selectedId) ?? spotlightCase(run);
+  const panel = useRef<HTMLDivElement>(null);
+  const reducedMotion = useReducedMotion();
+  const select = (item: RunCase) => () => {
+    setSelectedId(item.attack.id);
+    // Below lg the panel sits under the list; bring it into view so the selection visibly does something.
+    if (window.matchMedia("(max-width: 1023px)").matches) {
+      requestAnimationFrame(() => panel.current?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" }));
+    }
+  };
+
+  return (
+    <div className="space-y-10 pt-6 lg:space-y-12">
+      <Summary run={run} />
+      <div className="grid gap-10 lg:grid-cols-12 lg:gap-12">
+        <div className="min-w-0 space-y-8 lg:col-span-5">
+          <div>
+            <p className="label">
+              Needs attention · {attention.length}
+              <span className="sr-only"> findings; select one to see it explained</span>
+            </p>
+            {attention.length === 0 ? (
+              <p className="mt-3 text-[13.5px] text-moss-300">Nothing in this run: no attack still works and none is only hidden.</p>
+            ) : (
+              <ul className="mt-2">
+                {attention.map((item) => (
+                  <li key={item.attack.id}>
+                    <CaseButton item={item} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} />
+                  </li>
+                ))}
+              </ul>
+            )}
+            <dl className="mt-4 space-y-1.5 text-[12.5px] leading-snug">
+              {LEGEND.map((entry) => (
+                <div key={entry.label}>
+                  <dt className={`inline font-medium ${TONE_TEXT[entry.tone]}`}>{entry.label}:</dt>{" "}
+                  <dd className="inline text-bone-500">{entry.meaning}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+
+          <details className="group">
+            <summary className="label cursor-pointer list-none hover:text-bone-200">
+              <span aria-hidden className="mr-2 inline-block transition-transform group-open:rotate-90">›</span>
+              All {run.cases.length} attacks in this run
+            </summary>
+            <div className="mt-4 space-y-4">
+              <OutcomeStrip run={run} />
+              <ul>
+                {run.cases.map((item) => (
+                  <li key={item.attack.id}>
+                    <CaseButton item={item} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} detail />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </details>
+
+          <Evidence run={run} />
+
+          <div className="flex flex-wrap gap-3">
+            <a href={href("reports", run.id)} className="btn">
+              Open the risk report
+            </a>
+            <a href={href("runs", run.id)} className="btn">
+              Prompts and answers
+            </a>
+          </div>
+        </div>
+        <div ref={panel} className="min-w-0 scroll-mt-20 lg:col-span-7" aria-live="polite">
+          {selected && <Finding item={selected} />}
+        </div>
       </div>
     </div>
   );
 }
 
-/** Run metadata in full: nothing truncated, the audit head wraps in groups of eight. */
-function RunFacts() {
-  const { run, meta } = useLab();
-  if (!run) return null;
-  const facts: [string, ReactNode][] = [
-    [
-      "Run",
-      <a href={href("runs", run.id)} className="text-bone-50 underline decoration-ink-500 underline-offset-4 hover:decoration-bone-400">
-        {shortId(run.id)}
-      </a>,
-    ],
-    ["Started", dateTime(run.created_at)],
-    ["Storage", meta?.storage ?? "…"],
-    [
-      "Audit head",
-      run.report ? (
-        <span className="break-words text-bone-400" title={run.report.audit.head_hash}>
-          {groupHash(run.report.audit.head_hash)}
-        </span>
-      ) : (
-        "pending"
-      ),
-    ],
-  ];
-  return (
-    <dl className="grid grid-cols-[84px_1fr] gap-x-4 gap-y-2 font-mono text-[11px] leading-relaxed">
-      {facts.map(([term, value]) => (
-        <div key={term} className="contents">
-          <dt className="tracking-[0.12em] text-bone-500 uppercase">{term}</dt>
-          <dd className="min-w-0 text-bone-200">{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
+function LatestRun() {
+  const { run, runLoad, busy, playing, failed } = useLab();
 
-function Findings() {
-  const { run } = useLab();
-  const remaining = run?.report?.cases.filter((c) => c.residual_risk !== "none" && c.residual_risk !== "low") ?? [];
+  let body: ReactNode;
+  if (!run && runLoad === "loading") {
+    body = <p className="py-8 text-[14px] text-bone-500">Loading the latest run…</p>;
+  } else if (!run && runLoad === "failed") {
+    body = (
+      <div className="pt-6">
+        <Note tone="error">
+          The latest run could not be loaded (the message at the top of the page says why). Saved runs are not lost: reload
+          once the API answers, or open <a href={href("runs")} className="text-bone-50 underline underline-offset-4">Test runs</a>.
+        </Note>
+      </div>
+    );
+  } else if (!run) {
+    body = (
+      <p className="max-w-2xl py-8 text-[14px] leading-relaxed text-bone-400">
+        No test has run yet. <span className="text-bone-50">Run a security test</span> sends every attack in the library to
+        the target, checks each answer, lets the Blue Team add protections, tries again and records every step. To choose
+        specific attacks, open the{" "}
+        <a href={href("attacks")} className="text-bone-50 underline decoration-ink-500 underline-offset-4">
+          Attack library
+        </a>
+        .
+      </p>
+    );
+  } else if (!run.report) {
+    const refused = refusedStage(failed, run);
+    body = (
+      <div className="space-y-6 pt-6">
+        {!busy && (
+          <Note tone={refused ? "error" : "warn"}>
+            This run is not complete: it stopped after {stoppedAfter(run)}
+            {refused ? `, because the backend refused the “${PLAIN_STAGE[refused].name}” step (the message at the top of the page says why)` : ""}.
+            It has no report yet. Resume it from the link above; finished steps are not repeated.
+          </Note>
+        )}
+        <Pipeline run={run} playing={playing} failedAt={refused} />
+      </div>
+    );
+  } else {
+    body = <CompletedRun key={run.id} run={run} />;
+  }
+
   return (
-    <section className="min-w-0 lg:col-span-7">
+    <section>
       <SectionHead
-        index="02"
-        title="Findings that remain"
-        aside={run?.report && <a href={href("reports", run.id)} className="label hover:text-bone-200">Full report →</a>}
+        index="01"
+        title={run && !run.report ? "The latest run · not complete" : "The latest run"}
+        aside={
+          run && (
+            <a href={href("runs", run.id)} className="label hover:text-bone-200">
+              {shortId(run.id)} · {dateTime(run.created_at)} →
+            </a>
+          )
+        }
       />
-      {!run?.report ? (
-        <p className="py-8 text-[14px] text-bone-500">Findings appear once a run reaches its report stage.</p>
-      ) : remaining.length === 0 ? (
-        <p className="py-8 text-[14px] text-moss-300">No medium or higher residual risk in the latest run.</p>
-      ) : (
-        <ul>
-          {remaining.map((c, i) => (
-            <li key={c.attack_id} className="hairline reveal grid grid-cols-[64px_1fr] gap-x-4 border-b py-5 sm:grid-cols-[72px_1fr_auto]" style={stagger(i)}>
-              <span className="font-mono text-[12px] text-bone-200">{c.attack_id}</span>
-              <div className="min-w-0">
-                <p className="text-[15px] font-medium tracking-tight">{c.title}</p>
-                <p className="text-[12.5px] text-bone-500">{c.technique}</p>
-                <p className="mt-2.5 max-w-xl text-[13.5px] leading-relaxed text-bone-400">{c.rationale}</p>
-                {c.recommendation && (
-                  <p className="mt-2 grid max-w-xl grid-cols-[40px_1fr] gap-2 text-[13.5px] leading-relaxed text-bone-200">
-                    <span className="label pt-[3px] text-moss-300">Next</span>
-                    {c.recommendation}
-                  </p>
-                )}
-              </div>
-              <div className="col-start-2 mt-3 sm:col-start-3 sm:mt-0">
-                <RiskTag risk={c.residual_risk} />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function AuditTail() {
-  const { version } = useLab();
-  const { data: events } = useLoad(() => api.audit(9), [version]);
-  return (
-    <section className="min-w-0 lg:col-span-5">
-      <SectionHead index="03" title="Audit tail" aside={<a href={href("audit")} className="label hover:text-bone-200">Verify chain →</a>} />
-      {events && events.length === 0 && <p className="py-8 text-[14px] text-bone-500">The chain is empty.</p>}
-      <ol>
-        {events
-          ?.slice()
-          .reverse()
-          .map((event, i) => (
-            <li key={event.seq} className="hairline fade-in grid grid-cols-[52px_1fr_auto] items-baseline gap-3 border-b py-2.5" style={stagger(i)}>
-              <span className="font-mono text-[11px] text-bone-500">#{event.seq}</span>
-              <span className="min-w-0 truncate text-[13px] text-bone-200">
-                {event.event_type}
-                <span className="ml-2 font-mono text-[10.5px] tracking-[0.08em] text-bone-500 uppercase">{event.actor}</span>
-              </span>
-              <Hash value={event.hash} length={10} />
-            </li>
-          ))}
-      </ol>
+      {body}
     </section>
   );
 }
@@ -190,27 +427,24 @@ export function Overview() {
   const stageIndex = playing ? STAGES.indexOf(playing) + 1 : null;
 
   return (
-    <div className="space-y-16 lg:space-y-20">
+    <div className="space-y-14 lg:space-y-20">
       <section className="grid gap-10 lg:grid-cols-12 lg:gap-12">
-        <div className="flex min-w-0 flex-col lg:col-span-4">
-          <Headline />
-          <div className="hairline mt-10 space-y-7 border-t pt-6 lg:mt-auto">
-            {run && <OutcomeStrip run={run} />}
-            <RunFacts />
-          </div>
+        <div className="min-w-0 lg:col-span-5 lg:pt-6">
+          <Intro />
         </div>
         <figure
-          className="ticks hairline reveal relative h-[400px] min-w-0 border sm:h-[520px] lg:col-span-8 lg:h-[640px]"
+          className="ticks hairline reveal relative h-[380px] min-w-0 border sm:h-[500px] lg:col-span-7 lg:h-[600px]"
           style={stagger(1)}
-          aria-label="Isolation lattice: Red Team, Target LLM and Blue Team zones separated by gated walls"
+          aria-label="Isolation lattice: Red Team, Target and Blue Team zones separated by gated walls"
         >
           <SecurityCore run={run} stage={stage} playing={Boolean(playing)} />
           <figcaption className="pointer-events-none absolute inset-x-4 top-4 flex items-start justify-between gap-4">
-            <span className="label whitespace-nowrap">Fig. 01<span className="hidden sm:inline"> · Isolation lattice</span></span>
-            {/* Kept short on phones so it never collides with the Target label; the footer carries the detail. */}
+            <span className="label whitespace-nowrap">
+              Fig. 01<span className="hidden sm:inline"> · Tester, target and defender, kept apart</span>
+            </span>
             {stageIndex ? (
               <span className="label text-right text-moss-300">
-                Stage 0{stageIndex} / 07<span className="hidden sm:inline"> · {STAGE_INFO[playing!].title}</span>
+                Step 0{stageIndex} / 07<span className="hidden sm:inline"> · {PLAIN_STAGE[playing!].name}</span>
               </span>
             ) : (
               <span className="label hidden text-right sm:inline">{run?.report ? "Final state · latest run" : "Idle"}</span>
@@ -219,21 +453,7 @@ export function Overview() {
         </figure>
       </section>
 
-      <section>
-        <SectionHead
-          index="01"
-          title="Execution pipeline"
-          aside={<span className="label hidden sm:inline">Each stage is executed by the backend before it is shown</span>}
-        />
-        <div className="pt-4 lg:pt-7">
-          <Pipeline run={run} playing={playing} />
-        </div>
-      </section>
-
-      <div className="grid gap-14 lg:grid-cols-12 lg:gap-12">
-        <Findings />
-        <AuditTail />
-      </div>
+      <LatestRun />
     </div>
   );
 }

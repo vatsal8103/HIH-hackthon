@@ -196,6 +196,8 @@ export interface ProbeRow {
   expected: "allow" | "deny";
   status: number;
   ok: boolean;
+  /** Which credential the probe used: the agent's own signed one, one the control plane holds, or none. */
+  credential?: "agent-signed" | "held" | "none";
 }
 
 export interface Meta {
@@ -203,18 +205,26 @@ export interface Meta {
   criteria: Record<string, { title: string; severity: Risk; description: string }>;
   rules: Record<string, { title: string; stage: "input" | "output"; description: string }>;
   playbook: Record<string, string>;
-  controls: { name: string; status: "implemented" | "simulated" | "planned"; detail: string }[];
+  controls: { name: string; status: "implemented" | "simulated" | "planned" | "unknown"; detail: string }[];
   permissions: Record<string, string[]>;
   deployment: { roles: Record<string, RoleMode>; checkpoint: "witness" | "not-configured" };
+  /** What answers as the target, as reported by the process that runs it. */
+  target: TargetInfo;
   storage: string;
 }
 
+export interface TargetInfo {
+  provider: string | null;
+  kind: "simulated" | "unknown" | (string & {});
+  source: string;
+}
+
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
+  status: number; // a plain field (not a parameter property) so `node --test` can strip the types
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
   }
 }
 
@@ -230,7 +240,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const detail = typeof body.detail === "string" ? body.detail : response.statusText;
+    // A proxy answering for an API that is down has no JSON detail; the backend's own errors always do.
+    const detail =
+      typeof body.detail === "string"
+        ? body.detail
+        : response.status >= 502 && response.status <= 504
+          ? `The Bayora API is not answering (${response.status}). Is the backend running?`
+          : response.statusText;
     throw new ApiError(response.status, detail);
   }
   return response.json() as Promise<T>;
@@ -239,18 +255,49 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
+// Minimal shape checks: a 200 with an unexpected body is an error, never an empty success.
+type Check = (value: unknown) => boolean;
+const isList: Check = Array.isArray;
+const isRecord = (...keys: string[]): Check => (value) =>
+  typeof value === "object" && value !== null && keys.every((key) => key in value);
+const isRun = isRecord("id", "stage", "cases", "defenses", "isolation");
+
+async function checked<T>(response: Promise<unknown>, valid: Check, what: string): Promise<T> {
+  const value = await response;
+  if (!valid(value)) throw new ApiError(502, `The API returned an unexpected ${what}.`);
+  return value as T;
+}
+
 export const api = {
-  meta: () => request<Meta>("/api/meta"),
-  attacks: () => request<Attack[]>("/api/attacks"),
-  runs: () => request<RunSummary[]>("/api/runs"),
-  run: (id: string) => request<RunDetail>(`/api/runs/${id}`),
+  meta: () => checked<Meta>(request("/api/meta"), isRecord("stages", "criteria", "rules", "controls", "deployment"), "metadata response"),
+  attacks: () => checked<Attack[]>(request("/api/attacks"), isList, "attack list"),
+  runs: () => checked<RunSummary[]>(request("/api/runs"), isList, "run list"),
+  run: (id: string) => checked<RunDetail>(request(`/api/runs/${encodeURIComponent(id)}`), isRun, "run"),
   createRun: (attackIds?: string[]) =>
-    post<RunDetail & { checkpoint?: CheckpointPublish }>("/api/runs", attackIds ? { attack_ids: attackIds } : {}),
+    checked<RunDetail & { checkpoint?: CheckpointPublish }>(
+      post("/api/runs", attackIds ? { attack_ids: attackIds } : {}),
+      isRun,
+      "new run",
+    ),
   advance: (id: string) =>
-    post<{ executed: Stage; run: RunDetail; checkpoint?: CheckpointPublish }>(`/api/runs/${id}/advance`),
+    checked<{ executed: Stage; run: RunDetail; checkpoint?: CheckpointPublish }>(
+      post(`/api/runs/${encodeURIComponent(id)}/advance`),
+      (value) => isRecord("executed", "run")(value) && isRun((value as { run: unknown }).run),
+      "stage result",
+    ),
   audit: (limit = 200, sessionId?: string) =>
-    request<AuditEvent[]>(`/api/audit?limit=${limit}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  verify: () => request<Verification>("/api/audit/verify"),
-  tamper: (mode: TamperMode, seq?: number) => post<TamperResult>("/api/audit/tamper-test", { mode, seq }),
-  probeMatrix: () => post<ProbeRow[]>("/api/isolation/matrix"),
+    checked<AuditEvent[]>(
+      request(`/api/audit?limit=${limit}${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      isList,
+      "audit list",
+    ),
+  verify: () =>
+    checked<Verification>(
+      request("/api/audit/verify"),
+      (value) => isRecord("ok", "checked", "errors")(value) && typeof (value as { ok: unknown }).ok === "boolean",
+      "verification result",
+    ),
+  tamper: (mode: TamperMode, seq?: number) =>
+    checked<TamperResult>(post("/api/audit/tamper-test", { mode, seq }), isRecord("verification", "summary"), "simulation result"),
+  probeMatrix: () => checked<ProbeRow[]>(post("/api/isolation/matrix"), isList, "probe matrix"),
 };

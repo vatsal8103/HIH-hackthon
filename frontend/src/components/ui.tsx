@@ -1,44 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
-import type { IsolationCheck, Risk, RunDetail, Stage, Verdict } from "../api";
-
-export const STAGE_INFO: Record<Stage, { title: string; actor: string; description: string }> = {
-  attack: {
-    title: "Attack",
-    actor: "Red Team",
-    description: "The Red Team submits controlled adversarial prompts through its own interface.",
-  },
-  respond: {
-    title: "Respond",
-    actor: "Target LLM",
-    description: "The simulated target answers each prompt behind the active guardrails.",
-  },
-  evaluate: {
-    title: "Evaluate",
-    actor: "Evaluator",
-    description: "Each response is checked against the named safety criteria of its case.",
-  },
-  defend: {
-    title: "Defend",
-    actor: "Blue Team",
-    description: "The Blue Team reads redacted findings only and applies defensive rules.",
-  },
-  retest: {
-    title: "Retest",
-    actor: "Red Team → Target",
-    description: "The same cases run again against the defended target.",
-  },
-  isolation: {
-    title: "Isolation",
-    actor: "Platform",
-    description: "Live probes check that each role can reach only what it is permitted to.",
-  },
-  report: {
-    title: "Report",
-    actor: "Platform",
-    description: "Residual risk is scored and the audit chain is verified.",
-  },
-};
+import type { IsolationCheck, Risk, Stage, Verdict } from "../api";
 
 const RISK_STYLE: Record<Risk, string> = {
   none: "text-moss-300",
@@ -77,13 +39,14 @@ export function VerdictTag({ verdict }: { verdict: Verdict | null | undefined })
   );
 }
 
-const KIND_STYLE: Record<IsolationCheck["kind"] | "implemented", string> = {
+const KIND_STYLE: Record<IsolationCheck["kind"] | "implemented" | "unknown", string> = {
   enforced: "border-moss-800 text-moss-300",
   network: "border-moss-800 text-moss-300",
   configured: "border-moss-800 text-moss-300",
   implemented: "border-moss-800 text-moss-300",
   simulated: "border-amber-900 text-amber-300",
   planned: "border-ink-600 text-bone-400",
+  unknown: "border-rust-500 text-rust-300",
 };
 
 // What enforces each check, spelled out so an application check is never read as network isolation.
@@ -94,6 +57,7 @@ const KIND_LABEL: Record<keyof typeof KIND_STYLE, string> = {
   implemented: "implemented",
   simulated: "simulated",
   planned: "planned",
+  unknown: "unknown",
 };
 
 export function KindTag({ kind }: { kind: keyof typeof KIND_STYLE }) {
@@ -158,31 +122,6 @@ export const time = (iso: string) =>
 
 export const dateTime = (iso: string) =>
   new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-
-/** Real counts per stage, read from the run's recorded data. */
-export function stageMetric(run: RunDetail, stage: Stage): string | null {
-  const done = run.stage === "report" || (run.stage !== "created" && STAGE_ORDER[run.stage] >= STAGE_ORDER[stage]);
-  if (!done) return null;
-  const cases = run.cases;
-  switch (stage) {
-    case "attack":
-      return `${cases.filter((c) => c.baseline).length} submitted`;
-    case "respond":
-      return `${cases.filter((c) => c.baseline?.response).length} answered`;
-    case "evaluate":
-      return `${cases.filter((c) => c.baseline?.verdict === "fail").length} failed`;
-    case "defend":
-      return `${run.defenses.length} rule${run.defenses.length === 1 ? "" : "s"} applied`;
-    case "retest":
-      return `${cases.filter((c) => c.retest?.verdict === "fail").length} still failing`;
-    case "isolation": {
-      const enforced = run.isolation.filter((c) => c.kind === "enforced");
-      return `${enforced.filter((c) => c.status === "pass").length}/${enforced.length} enforced pass`;
-    }
-    case "report":
-      return run.report ? `${run.report.overall_risk} residual` : null;
-  }
-}
 
 export const STAGE_ORDER: Record<Stage, number> = {
   attack: 0,

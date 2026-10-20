@@ -14,35 +14,38 @@ function Cell({ verdict }: { verdict: Verdict | null | undefined }) {
 }
 
 const describe = (c: RunCase) =>
-  `${c.attack.id} ${c.attack.title}: baseline ${c.baseline?.verdict ?? "pending"}, retest ${c.retest?.verdict ?? "pending"}` +
-  (c.residual ? `, residual risk ${c.residual.residual_risk}` : "");
+  `${c.attack.id} ${c.attack.title}: first try ${c.baseline?.verdict ?? "pending"}, retry ${c.retest?.verdict ?? "pending"}` +
+  (c.residual ? `, remaining risk ${c.residual.residual_risk}` : "");
 
 /** One column per case: baseline verdict over retest verdict, underlined by residual risk. */
 export function OutcomeStrip({ run }: { run: RunDetail }) {
   return (
     <figure>
       <div className="flex items-baseline justify-between gap-4">
-        <figcaption className="label">Case outcomes</figcaption>
-        <span className="font-mono text-[10px] tracking-[0.1em] text-bone-500 uppercase">baseline / retest</span>
+        <figcaption className="label">Each attack</figcaption>
+        <span className="font-mono text-[10px] tracking-[0.1em] text-bone-500 uppercase">first try / retry</span>
       </div>
-      <ol className="mt-3 grid gap-x-1" style={{ gridTemplateColumns: `repeat(${run.cases.length}, minmax(0, 1fr))` }}>
+      {/* One labelled image rather than a list: its cells carry no visible text, so as a list it read as seven
+          empty items in text extraction. The label carries every attack's verdicts for assistive technology. */}
+      <div
+        role="img"
+        aria-label={run.cases.map(describe).join("; ")}
+        className="mt-3 grid gap-x-1"
+        style={{ gridTemplateColumns: `repeat(${run.cases.length}, minmax(0, 1fr))` }}
+      >
         {run.cases.map((c) => (
-          <li key={c.attack.id} title={describe(c)}>
-            <span className="sr-only">{describe(c)}</span>
-            <span aria-hidden className="block space-y-px">
+          <div key={c.attack.id} title={describe(c)}>
+            <span className="block space-y-px">
               <Cell verdict={c.baseline?.verdict} />
               <Cell verdict={c.retest?.verdict} />
             </span>
             <span
-              aria-hidden
               className={`mt-1 block h-0.5 transition-colors duration-700 ${c.residual ? RESIDUAL_LINE[c.residual.residual_risk] : "bg-ink-700"}`}
             />
-            <span aria-hidden className="mt-1.5 block truncate text-center font-mono text-[9.5px] text-bone-400">
-              {c.attack.id}
-            </span>
-          </li>
+            <span className="mt-1.5 block truncate text-center font-mono text-[9.5px] text-bone-400">{c.attack.id}</span>
+          </div>
         ))}
-      </ol>
+      </div>
       <div aria-hidden className="mt-3 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[9.5px] tracking-[0.1em] text-bone-500 uppercase">
         <span className="flex items-center gap-1.5"><span className="size-2 bg-rust-500" />fail</span>
         <span className="flex items-center gap-1.5"><span className="size-2 bg-moss-800" />pass</span>
@@ -65,7 +68,7 @@ export function OutcomeBar({ counts }: { counts: RunSummary["counts"] }) {
     <span
       className="flex h-1.5 w-full max-w-40 gap-px"
       role="img"
-      aria-label={`${clean} passed at baseline, ${counts.mitigated} mitigated, ${counts.residual_failures} still failing`}
+      aria-label={`${clean} passed at first, ${counts.mitigated} passed after a protection, ${counts.residual_failures} still failing`}
     >
       {segments.map(([value, color], i) => (value ? <span key={i} className={color} style={{ flexGrow: value }} /> : null))}
     </span>

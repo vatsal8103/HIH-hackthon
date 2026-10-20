@@ -2,17 +2,18 @@
 
 The end-to-end execution path through the codebase, per `AGENTS.md`. Every path here was checked against the source, and the Docker paths were run (see §8). Anything not exercised is marked **(unverified)**.
 
-_Last verified: 2026-10-20, against the privilege reduction milestone: signed role credentials, the runtime database role, witness extension proofs and recovery, and the edge relay. The earlier security hardening and review paths are still current. The frontend animation flow (§2.5) is from the visual refinement pass._
+_Last verified: 2026-10-21 for the beginner-facing frontend (§1 step 7, §2.5, §2.7) and `GET /api/meta` `target`; 2026-10-20 against the privilege reduction milestone: signed role credentials, the runtime database role, witness extension proofs and recovery, and the edge relay. The earlier security hardening and review paths are still current. The frontend animation flow (§2.5) is from the visual refinement pass._
 _History: the baseline on the same date had no code. The first vertical slice ran every role in-process; this milestone adds isolated agents and the witness._
 
 ## Components
 
 | Layer | Entry | Responsibility |
 |---|---|---|
-| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential |
+| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential. Hash routes: overview, `how`, `demo`, `runs`, `attacks`, `isolation`, `audit`, `reports` |
+| Plain language | `src/explain.ts` (pure, unit-tested by `src/explain.test.ts`), `src/components/Explain.tsx` | Turns recorded run data into plain outcome labels, stage states and results, risk and checkpoint wording, and the target notice. Never adds facts the data lacks |
 | Edge relay | Docker only: `frontend/relay.conf` (nginx stream, Dockerfile target `relay`) | Holds the published loopback port and forwards raw TCP to `frontend:8080` over `ui_net`. Holds no credential and parses no HTTP |
 | Edge proxy | Docker: `frontend/nginx.conf.template` (nginx-unprivileged, target `app`, internal networks only). Dev: `frontend/vite.config.ts` proxy | Answers only `Host` 127.0.0.1 or localhost (nginx 421 otherwise; Vite 403). Injects the operator token server-side, replacing any client `Authorization` header. Refuses `/api/(red\|blue\|target)/` (nginx 403, Vite 404). nginx adds anti-framing, `nosniff` and `no-referrer` headers |
-| Run controller | `src/lab.tsx` (`LabProvider`) | Creates runs, advances them stage by stage, holds `run`, `playing`, `busy`, `version`, and surfaces checkpoint failures |
+| Run controller | `src/lab.tsx` (`LabProvider`) | Creates runs, advances them stage by stage, holds `run`, `playing`, `busy`, `version`, `failed` (the stage the backend refused), and surfaces checkpoint failures |
 | API (control plane) | `backend/app/main.py` (`uvicorn app.main:app`) | `TrustedHostMiddleware` (`BAYORA_ALLOWED_HOSTS`), then routes, each with one permission (`auth.require`). The control register, checkpoint publishing and the verify endpoint |
 | Auth | `backend/app/auth.py` | `Bayora-Signed` token (Red, Blue) or Bearer token (operator, checked against its SHA-256 in Docker; static role tokens in dev) → `Principal(role, credential)`. The `PERMISSIONS` table. `validate_tokens()` at startup |
 | Credentials | `backend/app/tokens.py`, `backend/app/credentials.py`, `backend/app/keys.py` | Ed25519 compact tokens; control-plane grants; signed-request verification and revocation; `.env` key bootstrap and rotation |
@@ -82,9 +83,14 @@ Every container is non-root and read-only, with all capabilities dropped (Postgr
 5. **Witness** (`uvicorn witness.app:app`). It holds no state in memory; the whole log is read and validated on every request.
 6. **nginx.** The image's envsubst step renders `default.conf.template`, filtered to `BAYORA_*` variables, into a tmpfs `/etc/nginx/conf.d`. The operator token exists only in that rendered file and the container's environment. `edge-relay` starts `nginx -g "daemon off;"` directly, skipping the image's entrypoint scripts, with `relay.conf` as its whole configuration. It resolves `frontend` through Docker DNS (127.0.0.11).
 7. **Browser.** `index.html` → `main.tsx` → `<LabProvider><App/></LabProvider>`. `LabProvider` calls:
-   - `GET /api/meta`: stages, criteria, rules, playbook, the control register computed by `main.controls()` for this deployment, permissions, storage, and `deployment` (role modes, checkpoint). `Shell` shows Roles and Anchor from it.
+   - `GET /api/meta`: stages, criteria, rules, playbook, the control register computed by `main.controls()` for this deployment, permissions, storage, `deployment` (role modes, checkpoint), and `target` from `main.target_info()`:
+     - target in-process (dev): `providers.get_provider()` id and kind, `source: "in-process"`
+     - target agent (Docker): `GET {target}/healthz` with a 2 s timeout; its `provider` and `kind`, `source: "target agent"`
+     - agent unreachable or malformed: `kind: "unknown"`, `source: "target agent unreachable"`
+
+     `Shell` shows Target, Roles and Anchor from it. `explain.targetNotice(meta.target)` renders the "Demo environment · Target behavior is simulated" notice only when `kind` is `simulated`; nothing is shown when `target` is absent (an older API).
    - `GET /api/runs`, then the latest run.
-   A network failure → `ApiError(0, …)` → `online = false` and the error banner.
+   A network failure → `ApiError(0, …)` → `online = false` and the error banner. A 502–504 without a JSON `detail` (the proxy answering for a stopped API) becomes "The Bayora API is not answering"; the backend's own 502s keep their detail. Overview then says results are unavailable instead of "no test yet".
 
 ## 2. Running a test (the vertical slice)
 
@@ -209,18 +215,46 @@ After defend, the active rules are `secret-egress-filter`, `instruction-guard` a
 ### 2.5 Frontend during a run (animation state flow)
 _From the visual refinement pass, except for item 1's checkpoint banner, which this milestone added._
 
-1. Every advance response calls `setRun(next)`, `setPlaying(executed)` and `setVersion(v+1)`. If `checkpoint.status` is `failed` or `rejected`, `lab.error` shows "Audit checkpoint … after <stage>". `drive()` then waits `STAGE_MS[executed]`, or 280 ms with reduced motion or after **Skip animation**.
+1. Every advance response calls `setRun(next)`, `setPlaying(executed)` and `setVersion(v+1)`. A refused advance records `failed = {runId, stage: next_stage}` before the error propagates; a new start or resume clears it. If `checkpoint.status` is `failed` or `rejected`, `lab.error` says the step was saved but its witness anchoring failed or was rejected. `drive()` then waits `STAGE_MS[executed]`, or 280 ms with reduced motion or after **Skip animation**.
 2. **Shell** announces each executed stage, and the final risk, through a `role="status"` region. The rail shows API, Target, Storage, Roles (isolated or in-process), Anchor (witness or none) and Run.
-3. **Overview** derives `stage = playing ?? run.stage ?? "idle"`:
-   - `Headline`
-   - `OutcomeStrip`: per-case verdict cells, hatched until written
-   - `RunFacts`: grouped audit head
-   - `Pipeline`: active / done / pending, with real `stageMetric`s
-   - `AuditTail`: refetched on `version`
+3. **Overview** (simplified 2026-10-21) derives `stage = playing ?? run.stage ?? "idle"` and describes only `lab.run`, the latest run:
+   - **`Intro`:** headline, one sentence, **Run a security test** (primary; disabled while a run is in progress), **See how it works** (secondary), a helper line with **Skip the animation** while busy or **Resume it** for an unfinished latest run, and `TargetNotice` ("the target is simulated: it uses deterministic rules and is not a live AI model", from `/api/meta` `target`).
+   - **`LatestRun`, distinct states:**
+     - loading (`lab.runLoad`)
+     - failed to load: the error, with a pointer to Test runs
+     - no runs
+     - not complete: a note naming the refused step via `refusedStage`, plus `Pipeline` as progress (plain name, role, state, result)
+     - completed (`CompletedRun`, keyed by run id; demo polish 2026-10-21):
+       - four `Summary` metrics from `outcomeCounts` and the report (attacks tested, passed on retest, still vulnerable, highest remaining risk), with one "scripted tests are not proof of safety" line
+       - **Needs attention** (outcomes vulnerable, regressed or masked) as selectable buttons (`aria-pressed`)
+       - a legend for the three outcome labels from `OUTCOME_MEANING`, which How it works also uses
+       - every attack, collapsed in a `<details>`: `OutcomeStrip` (one `role="img"` with an `aria-label` naming every attack's verdicts; a list of colour-only cells read as seven empty items in text extraction), then one row per attack with ID, name, outcome label and "first try · retry · risk" from the recorded attempts and residual
+       - `Evidence`: "when the report was made" (`report.audit`: intact or broken, entry count, witness coverage) kept apart from "the current record", which links to the Audit trail
+       - `Finding` for the selected case (default `spotlightCase`); below `lg`, selecting scrolls it into view. Its **Technical evidence** disclosure shows the verdicts, the protection that acted (`guardLine`), the recorded reason (`residual.rationale`), and per-rule results from the stored `criteria` of both attempts; "not recorded" where data is absent
+
+   The step explanations live once, on How it works; the event list lives on the Audit trail.
 4. **`SecurityCore`:** `highlight = hovered ?? selected` (pointer, focus or pin) drives the permission panel, the labels and the scene. `sceneData(run)` reduces the run to counts. The footer `readout()` is built from run data only. A WebGL failure, a loading chunk or a scene error → `LatticeFallback`.
 5. **`LatticeCanvas`:** progress `p` over 92% of `STAGE_MS[stage]`. `live(s) = playing && stage === s` gates the gates, probes and glows; recorded state (facet failure share, rings, evaluator) shows whenever the run has reached it. The camera moves to a framing per playing stage (hero framing with reduced motion). Frames render on demand only.
 6. When the loop ends, `playing` and `busy` clear, and the scene shows the final recorded state.
 7. Other pages refetch on `version`. Run detail prefers `lab.run` while the run is active.
+
+### 2.7 Guided demo (`#/demo`, `pages/Demo.tsx`)
+1. `GET /api/attacks` once. The selected case defaults to `PI-01` (its first attempt fails in the seeded catalogue, so every step has content); the presenter can pick another.
+2. The data source is `lab.run`, the latest run. A step after step 2 renders only if that run has a report and contains the case. Otherwise `NeedsRun` states the exact reason: loading, failed to load, no runs, latest run unfinished, or latest run lacks the case. It offers **Run <id> now** (`lab.start([id])`), **Resume** for an unfinished run, or **Back to step 2**; while busy it shows the live step. Each step is labelled with its kind: explains, can start a test, shows recorded data, or read-only check.
+3. Step 2's **Run this attack now** calls `lab.start([id])`: the normal `POST /api/runs` plus advance loop. This adds a session and audit events; nothing is deleted.
+4. Steps 3 and 4 read the case's `baseline` and `retest` attempts, the run's `defenses`, `guardLine` and `caseOutcome`. Step 5 loads `GET /api/audit?session_id=<run>&limit=1000` and marks entries whose `evidence_ref` is one of the case's attempts. **Verify** calls `GET /api/audit/verify` (read-only) and words the witness result with `checkpointPlain`. Step 6 reads the report, `isolationCounts` and the case residual.
+5. The "Say this" text at each step is built from the same data. Witness sentences depend on `meta.deployment.checkpoint`.
+
+`#/how` (`pages/HowItWorks.tsx`) reads only `meta`: target, role modes, the witness setting, and the full control register with details. The register is shown here once; the Isolation lab links to it. How it works makes no verification call; the live status is on the Audit trail.
+
+### 2.8 Page reliability (frontend)
+- **Route boundary:** every route renders inside `RouteBoundary`, keyed by route. A render error shows the message (the stack too in dev), **Try again** and **Go to the overview**, while the shell and run controller keep working. `#/dev-crash` throws on purpose in dev builds only.
+- **API client:** `api.ts` checks each response's shape (a list where a list is expected; a run with id, stage, cases, defenses and isolation; a verification with a boolean `ok`). An unexpected 200 becomes an `ApiError`, never empty data. A proxy 502–504 without a JSON `detail` reads "The Bayora API is not answering".
+- **Lab:** the initial load sets `runLoad` to `failed` and shows the error instead of swallowing it. The error banner has **Dismiss**. A second start while busy is ignored (`busyRef`); tested with a double click.
+- **Audit trail:** `GET /api/audit/verify` runs when the page opens and after every run. A failed request clears any earlier result and shows "Verification could not run". **Verify again** replays the link walk. Tamper simulations are locked while one is in flight, so results cannot arrive out of order.
+- **Test runs:** a loading state, whole-row selection (the id link remains the keyboard path), and an explained error with a way back for an unknown run id. A run's isolation checks appear as a summary, with the full list in a disclosure.
+- **Risk reports:** the report shown must match the selected id (`run.id === selectedId`). A failed run list or report load is shown as an error. A run without a report says so and links to resume it.
+- **Isolation lab:** "expected" (permission table) before probing and "observed" after. Each role shows the credential its probes used, and a role with no credential is expected to be refused everywhere.
 
 ## 3. Isolation checks (`isolation.run_checks`)
 1. Reads the session's attempts.
@@ -327,7 +361,8 @@ What it detects: edits, deletions, reordering and truncation anywhere up to the 
 | Witness reply malformed | Publish `failed`; verify `unavailable` (`ok: false`); tamper-test 502 |
 | Startup misconfiguration | `validate_tokens` or `get_provider` raise; the API does not start |
 | Validation | 422 for bodies, unknown attack or criterion; 404 for unknown rule or session |
-| `api.request` (frontend) | Network failure → `ApiError(0)`; non-2xx → `ApiError(status, detail)` |
+| `api.request` (frontend) | Network failure → `ApiError(0)`; non-2xx → `ApiError(status, detail)`; proxy 502–504 without detail → "not answering"; malformed 200 → `ApiError(502)` |
+| Page render error | `RouteBoundary`: message, **Try again**, **Go to the overview**; the rest of the app keeps working |
 | `lab.guarded` | Sets `lab.error`, clears `busy`; the run can be resumed |
 | 3D | No WebGL, a scene exception or a loading chunk → `LatticeFallback` |
 
@@ -353,6 +388,36 @@ Residual risks from the security review (R1–R5), as of the privilege reduction
 - The local (non-Docker) witness was run once on temporary ports. It checks history but is not isolated from the API's OS user.
 
 ## 8. Verification log (2026-10-20)
+
+Simplification and release-readiness pass (2026-10-21):
+- **Unit tests:** `pytest` 106 passed plus 12 skipped (SQLite), 118 (PostgreSQL 14). `npm test` 17/17, including `src/api.test.ts`.
+- **Build and integration:** `npm run build` clean. `scripts/compose-test.sh` 61/61. `docker compose config -q` valid.
+- **Browser smoke test** (a Playwright session script, not part of the repository; headless Brave against throwaway SQLite APIs only): 59 assertions across five phases, all passing.
+  - empty database, all pages at desktop and mobile
+  - the error boundary and recovering from it
+  - a double click starting exactly one run
+  - completed-run summary; row selection and reload; unknown run id; report matching the selected run
+  - automatic audit verification
+  - the demo with a latest run lacking PI-01, then running it
+  - observed isolation probes
+  - a tampered throwaway database shown as failed verification
+  - a run failing at "Apply protection" (unreachable Blue agent): not presented as complete, refused step named, Resume offered
+  - the WebGL fallback with reduced motion
+  - API stopped: every page shows an error instead of empty data
+- **Docker:** rebuilt with volumes kept (db not recreated).
+  - Sessions (14), audit verification (719 entries), witness checkpoints (109) and the witness log's SHA-256 were identical before and after, and after a read-only walk through every page.
+- **Secret scan:** no private `.env` value in any tracked or unignored file, the local build or the Docker bundle.
+
+Beginner-friendly product pass (2026-10-21):
+- **Unit tests:** `pytest` 105 passed plus 12 skipped on SQLite, 117 on PostgreSQL 14 (adds `tests/test_meta.py`). `npm test`: 11/11 (`src/explain.test.ts`).
+- **Build and integration:** `npm run build` (tsc and vite) clean. `scripts/compose-test.sh` 61/61.
+- **Throwaway local stack** (API on :8001 with an empty SQLite file, Vite on :5180 via `BAYORA_DEV_API`), driven in headless Brave:
+  - empty, running, completed, offline and no-WebGL/reduced-motion states
+  - all eight pages at 1440 px and 390 px, with no console errors and no horizontal overflow
+- **Docker:** rebuilt with volumes kept.
+  - Sessions, audit verification (532 events), witness checkpoints (77) and the witness log's SHA-256 were identical before and after the rebuild.
+  - The read-only walk through the demo and every page left the data unchanged; `/api/meta` reports `target.kind = simulated` from the target agent.
+- **Bundle scan:** none of the 10 private `.env` values, and no dev token, appear in the local or Docker bundle.
 
 Privilege reduction milestone:
 - **`pytest` (unit):** 102 passed plus 12 skipped on SQLite (the skipped tests need PostgreSQL); 114 passed on PostgreSQL 14.

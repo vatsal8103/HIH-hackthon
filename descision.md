@@ -641,3 +641,105 @@ Requested by the user:
 - **Restarts and pending work:**
   - **Required:** recreating the containers that changed (all except `db`) was required and done.
   - **Not done:** the dev API on :8000 (started 15:52, no `--reload`) still runs the earlier code, so it needs a manual restart to pick up this milestone. Vite needs no restart.
+
+## 2026-10-21 — Beginner-facing product experience and guided demo
+- Status: Accepted.
+- **Decision:** make Bayora understandable to non-specialists by adding a plain-language layer over the existing UI, a "How it works" page and a guided demo. The architecture, security model, pipeline stages and visual identity are unchanged.
+- **Approach:**
+  - **One wording module, `frontend/src/explain.ts`.** Every plain label (case outcome, stage state and result, risk wording, checkpoint wording, target notice, audit event names) is a pure function of API data.
+    - **Why:** the wording can be unit-tested and reviewed in one place, and pages cannot drift into claims the data does not support.
+    - **Tests without a new dependency:** `src/explain.test.ts` runs under `node --test`, since Node 24 strips the types. Test files are excluded from the app's tsconfig, which has no Node typings.
+  - **Outcome vocabulary mirrors `pipeline.residual_risk` exactly:**
+
+    | Recorded result | Label |
+    |---|---|
+    | Pass, then pass | Passed this test (never "safe") |
+    | Fail, then pass, by an input block or fence | Stopped by a protection |
+    | Fail, then pass, only because the output filter rewrote the reply | Hidden, not fixed (the backend scores it medium) |
+    | Retest fail | Still vulnerable, or Failed the retry |
+
+  - **Stage states:** waiting, running, completed, failed. The lab now records the stage the backend refused (`lab.failed`). There is no "skipped" state, because the backend never skips a stage; inventing one was rejected.
+  - **Target notice from real data:** `GET /api/meta` gains `target` (`main.target_info`). In dev it comes from the in-process provider; in Docker it comes from the target agent's own `/healthz`; an unreachable agent gives `kind: unknown`.
+    - **Hardcoded labels removed:** the sidebar's fixed "simulated" label and the scene's "Simulated" zone caption are gone. The notice is shown only when the backend reports `simulated`.
+    - **Rejected:** keeping a constant "simulated" label (true today, but false the moment a provider is added), and deriving the status from the last recorded target event (it says nothing before the first run).
+  - **Guided demo (`#/demo`):** six steps that read the latest run, plus a suggested "Say this" line built from that data.
+    - **Running from the demo:** if the run lacks the chosen case, step 2 runs it through the existing `lab.start([id])` and says beforehand that this adds a saved session and deletes nothing.
+    - **Rejected:** a presentation-only simulation, hardcoded results, or a separate demo endpoint.
+  - **Deployment-dependent statements are conditional:** witness sentences depend on `meta.deployment.checkpoint`. The Isolation lab scope note depends on role mode; its old text said container and network isolation are not enforced, which has been wrong for the Docker stack since the hardening milestone.
+  - **Offline state:** a 502–504 from the proxy without a JSON `detail` reads "The Bayora API is not answering", and the overview says results are unavailable rather than "no test yet".
+- **Supporting changes:**
+  - `vite.config.ts` accepts `BAYORA_DEV_API`, a dev-only proxy target override (default `:8000`), so a throwaway API can be exercised without touching the running dev API or its database.
+  - `STAGE_INFO` and `stageMetric` were replaced by `PLAIN_STAGE` and `stageResult`.
+- **Bug found while verifying:** with no runs, `failed?.runId === run?.id` was `undefined === undefined`, which crashed the overview and unmounted the app. Both comparisons now require both values.
+- **Trade-offs:**
+  - **Text, not tooltips:** more words on screen. To limit that, the cards use visible helper text rather than hover tooltips (which are unreachable on touch), terms use a `?` toggle, and expert details sit in `<details>` "Technical detail" blocks.
+  - **The demo depends on the latest run:** after a subset run without the chosen attack, the presenter must run it first.
+- **Not changed:** authentication, authorization, isolation, database privileges, audit verification, witness rules, the stages and their order, and the stored data.
+
+## 2026-10-21 — Simplification, reliability and release readiness
+- Status: Accepted.
+
+- **Inventory first (from the source and the running app):**
+
+  | Page | Before | Problem |
+  |---|---|---|
+  | Overview | Hero, four cards, the full seven-step pipeline with explanations, a summary sentence, a full per-attack list, a spotlight, and an audit-event list | Repeated How it works, Test runs and the Audit trail; its metrics competed |
+  | How it works | Ran its own live verification and showed the control register | Both repeated other pages: verification is the Audit trail's job, and the Isolation lab also showed the register |
+  | Risk reports | Repeated the Overview's four-number dashboard; buried next actions after the table | Load errors were silently dropped |
+  | Isolation lab | Showed the permission table before probing as if it were the expected probe outcome | In Docker the target holds no credential, so a granted route is refused, and nothing explained it |
+  | Audit trail | Verification ran only on request | A failed request did nothing (no `catch`); tamper buttons could fire concurrent requests |
+  | Attack library | Rendered nothing while loading | |
+  | Lab controller | Swallowed a failed initial run load, so the Overview said "no test yet" | The error banner could not be dismissed |
+  | App | No page-level error boundary: one render error blanked the whole app | |
+  | Backend register | "Target model" hardcoded as simulated | Disagreed in principle with the live target notice |
+
+- **Decisions:**
+  1. **One responsibility per page.**
+     - **Overview:** the latest run only: the hero with one state-dependent primary action and one learning link, then the run's summary, attention list, one explained result and the evidence snapshot.
+     - **How it works:** owns the role and step explanations and the control register (now with details).
+     - **Audit trail:** owns live verification.
+     - **Isolation lab:** owns isolation checks.
+     - The pipeline appears only as progress for an unfinished run, without explanations.
+     - **Alternative kept for history:** a "latest completed run" fallback on the Overview was removed. It showed the previous run's numbers while a new one ran, which confused the two runs.
+  2. **Failures stay visible:**
+     - `lab.runLoad` distinguishes loading, ready and failed.
+     - The API client validates response shapes, so a malformed 200 is an error.
+     - Pages show load errors.
+     - The Audit trail clears an earlier result when a verification fails.
+     - **Rejected:** a schema library (a new dependency) and polling; the run flow already refreshes through `version`.
+  3. **`RouteBoundary` around every route,** reset by the route key. In dev, `#/dev-crash` exists to exercise it and is compiled out of production builds.
+  4. **Reports:**
+     - Remaining issues are retest failures (any severity, including over-blocking) plus medium or higher.
+     - Low-risk cases a protection stopped get a single "keep it in place" line.
+     - The four-number grid is gone; the summary sentence keeps the counts.
+  5. **The target register entry is derived from the same `target_info()` answer as the notice,** asked once per `/api/meta`. An unreachable target gets the status `unknown`, which How it works shows only when it occurs.
+     - **Rejected:** mapping it to "planned", which would claim it is not built.
+  6. **Removed outright:**
+     - the sidebar footer repeating the Target status
+     - the Overview audit-event list and `AuditTail`
+     - the duplicate Resume button on an unfinished run
+     - How it works' `CheckpointDiagram` and live verification
+     - glossary entries already explained on the same page
+- **Regression tests:**
+  - `frontend/src/api.test.ts` (5): stopped API, the backend's own errors kept, malformed 200s rejected, valid responses unchanged, unreachable API.
+  - `refusedStage` in `explain.test.ts`: the empty-overview crash.
+  - `backend/tests/test_meta.py`: the register and the notice agree, including for an unreachable target.
+- **Not changed:** authentication, authorization, isolation, database privileges, audit and witness rules, the stored data, and the visual identity.
+
+## 2026-10-21 — Overview polish for the final demonstration
+- Status: Accepted. This changes only the Overview; backend behavior and data are untouched.
+
+- **Decisions:**
+  - **CTAs:** "Run a security test" is the primary button in every state (disabled while a run is in progress) and "See how it works" the secondary. "Skip the animation" and "Resume it" became helper-line text actions instead of replacing the primary button.
+  - **Target notice:** reworded in `explain.targetNotice` to "the target is simulated: it uses deterministic rules and is not a live AI model", still shown only when `/api/meta` reports `kind: simulated`.
+  - **Metrics:** attacks tested, passed on retest, still vulnerable, highest remaining risk. Each note says something the others do not, and one sentence below states that passing scripted tests does not prove safety.
+  - **One definition per outcome label:** `OUTCOME_MEANING` in `explain.ts` holds the label, tone and meaning for every outcome. The Overview legend shows the three that matter here (stopped by a protection, hidden, not fixed, still vulnerable); How it works shows all five from the same source. A unit test asserts that `caseOutcome` labels and tones match it.
+  - **Findings first:** "Needs attention" stays prominent and selects the finding panel. The full per-attack list is collapsed.
+  - **Technical evidence:** the panel's disclosure shows only recorded data: verdicts, the protection that acted, the backend's reason, and per-rule results from both attempts. It says "not recorded" where data is absent.
+  - **Evidence:** the report-time audit snapshot (intact or broken, entries, witness coverage) is labelled "when the report was made", separately from "the current record", which links to the Audit trail.
+  - **Mobile:** two metrics per row. Selecting a finding scrolls the panel into view, with no animation under reduced motion.
+- **Rejected:** a separate table component for the full attack list (the existing selectable rows suffice), and showing current verification on the Overview (it would duplicate the Audit trail).
+- **Verified:**
+  - **Unit and build:** `npm test` 19/19 and `npm run build` clean.
+  - **Browser smoke test on throwaway SQLite stacks:** 69 assertions, all passing: 45 main, 8 failing run, 4 tamper, 10 offline, 2 fallback.
+  - **Docker (frontend container only rebuilt):** the four metrics match `/api/runs/{latest}` at 1440 px and 390 px, with no overflow and no page errors. Live data was identical before and after: 15 sessions, 775 entries, 117 checkpoints, same witness-log hash.

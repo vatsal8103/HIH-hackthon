@@ -35,8 +35,41 @@ def deployment() -> dict:
     }
 
 
-def controls() -> list[dict]:
+def target_info() -> dict:
+    """What answers as the target here, as the process that runs it reports. Asked, never assumed."""
+    url = remote.agent_url("target")
+    if url is None:
+        provider = providers.get_provider()
+        return {"provider": provider.id, "kind": provider.kind, "source": "in-process"}
+    try:
+        health = remote.call(url, "GET", "/healthz", timeout=2.0)
+    except remote.RemoteError:
+        return {"provider": None, "kind": "unknown", "source": "target agent unreachable"}
+    kind = health.get("kind") if isinstance(health, dict) else None
+    provider = health.get("provider") if isinstance(health, dict) else None
+    return {
+        "provider": provider if isinstance(provider, str) else None,
+        "kind": kind if isinstance(kind, str) else "unknown",
+        "source": "target agent",
+    }
+
+
+def _target_control(target: dict) -> dict:
+    """The register entry for the target, from what the target reports (same source as the UI notice)."""
+    entry = {"name": "Target model"}
+    if target["kind"] == "simulated":
+        detail = f"{target['provider']}: deterministic rules, not an LLM. Real providers are planned behind the same interface."
+        return {**entry, "status": "simulated", "detail": detail}
+    if target["kind"] == "unknown":
+        detail = f"Unknown: {target['source']}, so what answers as the target cannot be stated."
+        return {**entry, "status": "unknown", "detail": detail}
+    detail = f"{target['provider'] or target['kind']}, as reported by the {target['source']}."
+    return {**entry, "status": "implemented", "detail": detail}
+
+
+def controls(target: dict | None = None) -> list[dict]:
     """The control register, computed from what this deployment actually runs."""
+    target = target or target_info()
     roles = deployment()["roles"]
     in_process = sorted(role for role, mode in roles.items() if mode == "in-process")
     signed = sorted(credentials.signed_roles())
@@ -112,12 +145,7 @@ def controls() -> list[dict]:
             "status": "implemented",
             "detail": "The proxy (nginx or the Vite dev server) injects it; the frontend bundle holds no token.",
         },
-        {
-            "name": "Target model",
-            "status": "simulated",
-            "detail": "Deterministic rule-based provider, not an LLM. Real providers are planned behind the same "
-            "interface.",
-        },
+        _target_control(target),
         {
             "name": "Blue Team agent",
             "status": "simulated",
@@ -243,13 +271,15 @@ def health():
 
 @app.get("/api/meta")
 def meta(_role: str = Depends(require("runs:read"))):
+    target = target_info()  # asked once per request: the notice and the register must agree
     return {
         "stages": pipeline.STAGES,
         "criteria": evaluator.CRITERIA,
         "rules": defenses.RULES,
         "playbook": defenses.PLAYBOOK,
-        "controls": controls(),
+        "controls": controls(target),
         "deployment": deployment(),
+        "target": target,
         "permissions": {role: sorted(perms) for role, perms in PERMISSIONS.items()},
         "storage": db.engine(),
     }

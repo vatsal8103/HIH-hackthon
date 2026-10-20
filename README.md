@@ -2,6 +2,59 @@
 
 A secure AI red-teaming laboratory, built for Hack in Hills '26, Track 4: Securing Adversarial AI Safety Testing Infrastructure.
 
+## In plain words
+
+**Can your AI withstand an attack?** AI assistants follow instructions written in ordinary language, so anyone can try to talk them into breaking their rules: leaking confidential data, ignoring their instructions, or writing something they should refuse. Bayora attacks an AI on purpose, in a controlled lab, checks whether the defenses work, and keeps evidence of everything that happened.
+
+Three roles take part:
+
+- **Red Team, the tester.** Sends scripted, harmless attack prompts from the attack library at a fictional clinic assistant.
+- **Target, the system under test.** Receives each prompt and answers it. Today it is a deterministic simulator (fixed rules, not a live AI model), and the UI says so based on what the backend reports.
+- **Blue Team, the defender.** Sees only a redacted summary of what failed (never the attack prompts) and adds protections: input guards and an output filter.
+
+One test runs in seven recorded steps:
+
+| Step | Plain name | What happens |
+|---|---|---|
+| 1 | Attack attempt | The Red Team sends the attack prompts |
+| 2 | AI response | The target answers each one |
+| 3 | Check the response | Each answer is checked against the written safety rules for its attack |
+| 4 | Apply protection | The Blue Team adds protections for what failed |
+| 5 | Try again | The same attacks run again; the two results are compared |
+| 6 | Check the walls | Bayora checks that each role can reach only what it is allowed to |
+| 7 | Score and record | The remaining risk is scored and the evidence record is verified |
+
+Every step is written to a hash-linked audit record (each entry carries the previous entry's fingerprint, so edits, deletions and reordering are detected). In the Docker stack a separate witness service also keeps checkpoints, which catch even a complete rewrite of anything already checkpointed. Events after the latest checkpoint are not covered until the next one, and someone who controls both the database and the witness's storage could still alter both: this is tamper detection, not tamper-proofing.
+
+Results use careful words: **Passed this test**, **Stopped by a protection**, **Hidden, not fixed** (an output filter removed the leak but the AI still tried), **Still vulnerable**, **Failed the retry**. A passed test means no failure was detected in that test, never that the AI is safe.
+
+### Guided demo and presenter script
+
+Open the UI, then **Guided demo** in the navigation (`#/demo`). It walks through six steps (the problem, the test, the result, the defense, the evidence, the conclusion) using the real data of the latest run, with a suggested sentence to say at each step. Each step is labelled with what it does: it explains, shows recorded data, can start a test (step 2) or runs a read-only check (step 5). If the latest run is missing, unfinished or does not include the chosen attack, the step says which, and offers to run that attack; this creates a new saved test session through the normal controls and deletes nothing. **How it works** (`#/how`) explains the roles, steps, evidence record and what is real or simulated in the deployment you are looking at.
+
+**A repeatable demo sequence** (Docker, about four minutes):
+
+1. **Overview** (`http://127.0.0.1:8080`): read the headline and the "Demo environment · Target behavior is simulated" notice. Press **Run a security test** and let the seven steps play (about 15 seconds; **Skip the animation** shortens it).
+2. **The latest run** on the same page: the four numbers (attacks tested, passed on retest, still vulnerable, highest remaining risk), then **Needs attention**. Select a finding to explain it in the panel; its **Technical evidence** disclosure shows the recorded rule results.
+3. **Guided demo**: step through 1–6 with the default attack PI-01, reading the "Say this" lines. In step 5 press **Verify the whole record now**.
+4. **Risk reports**: the remaining issues, why each matters, and the next action.
+5. **Audit trail**: the verification status at the top, then **Rewrite the chain** under Tamper simulation. The record's own links still verify, but the witness catches it. The stored record is never modified.
+6. **Isolation lab**: **Run 40 live probes**; point out that the target, which holds no credential in Docker, is refused even where the permission table grants it access.
+
+A 60 to 90 second script (also inside the demo page):
+
+> AI assistants take instructions in plain language, so anyone can try to talk them into breaking their rules. Bayora is a lab that tests that safely.
+>
+> A Red Team sends scripted attacks: overriding instructions, role-play jailbreaks, hidden instructions in documents. The target answers, and every answer is checked against written safety rules.
+>
+> Then a Blue Team, which only sees a redacted summary, adds protections, and every attack runs again. So we can show which defenses actually helped, which only hid the problem, and what still fails.
+>
+> Everything is recorded in a hash-linked audit trail, and a separate witness keeps checkpoints, so changes to the record are detected. In the Docker version the roles run in separate containers and can only reach what they're allowed to.
+>
+> Today the target is a deterministic simulator, and we say so on screen. The point is the method: attack, measure, defend, retest, and keep the evidence.
+
+## In technical terms
+
 Bayora tests two things at once:
 
 1. **Does the target AI follow its safety policy?** Controlled attacks, explicit criteria, a defense, then a retest.
@@ -98,6 +151,8 @@ npm run dev
 
 Stop either with Ctrl-C. In this mode the roles run inside the API process. The UI says so ("Roles: in-process", "Anchor: none"), and the isolation checks are labelled simulated or planned.
 
+**Another local API:** `BAYORA_DEV_API=http://127.0.0.1:8001 npx vite --port 5180` points the dev proxy at an API on another port (for example a throwaway one on an empty SQLite file). In dev mode `#/dev-crash` throws a deliberate render error to show the page-level error boundary; production builds do not include it.
+
 **PostgreSQL instead of SQLite:** `createdb bayora`, then start the API with `DATABASE_URL="postgresql:///bayora?host=/tmp"`.
 
 **Optional local witness:**
@@ -115,8 +170,8 @@ Locally, the witness only checks the chain's history; it is not isolated from th
 
 ```bash
 cd backend
-uv run pytest                     # 102 unit tests on SQLite (12 PostgreSQL-only tests skip)
-TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 114 on PostgreSQL (needs a superuser; creates role bayora_app_test)
+uv run pytest                     # 106 unit tests on SQLite (12 PostgreSQL-only tests skip)
+TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 118 on PostgreSQL (needs a superuser; creates role bayora_app_test)
 uv run ruff check . && uv run ruff format --check .
 
 cd ..
@@ -124,6 +179,7 @@ cd ..
 
 cd frontend
 npm run build                     # TypeScript strict check + production build
+npm test                          # 17 tests: plain-language rules and API error handling (Node's built-in test runner)
 ```
 
 `compose-test.sh` builds a separate Compose project, runs `backend/tests_compose/` against it, and removes it and its volumes afterwards. It never touches the main `bayora` stack.
@@ -140,6 +196,17 @@ curl -s localhost:8000/api/target/sessions/$RUN/inbox -H "Authorization: Bearer 
 ```
 
 In Docker these static role tokens do not exist: Red and Blue must sign requests, and the target has no credential. The API is not published at all. The edge proxy answers only for `127.0.0.1` or `localhost` (DNS-rebinding protection), acts only as the operator, and refuses `/api/red|blue|target/`. The API itself also rejects unknown `Host` headers (`BAYORA_ALLOWED_HOSTS`).
+
+## Known limitations and caveats
+
+- **The target is a simulator.** It follows fixed rules, so results show how the method works, not how a real model behaves. No live model provider is implemented; the UI shows "Demo environment" because `/api/meta` reports `target.kind: simulated`.
+- **The Blue Team is a fixed playbook,** mapping each failed rule to one protection.
+- **Seven scripted attacks are not a security audit.** A passed test shows that one attack failed here, nothing about attacks that were not tried.
+- **Dev mode is weaker than Docker.** Locally the roles run inside the API process, there is no witness unless you start one, and the UI says so (Roles: in-process, Anchor: none, and the isolation checks marked simulated or planned). Container, network, credential and database-privilege controls exist only in the Docker stack.
+- **Tamper detection has limits.** Events after the latest witness checkpoint are not covered yet, and whoever controls both the database owner role and the witness volume could alter both.
+- **Containers share one kernel** (the Docker Desktop VM); there is no gVisor or microVM sandbox.
+- **Per-user identity is not implemented.** The operator is one shared credential, injected by the proxy.
+- The security review's residual risks and the threat model are in `descision.md`; the execution path is in `flow.md`.
 
 ## Project layout
 
@@ -163,8 +230,9 @@ backend/witness/ app.py (append-only checkpoint log, extension proofs) · recove
 backend/tests/          unit tests          backend/tests_compose/  container and network tests
 frontend/src/
   lab.tsx        run controller: advances the backend one stage at a time
+  explain.ts     plain-language reading of recorded results (unit-tested; never says more than the data)
   scene/         3D security lattice (React Three Fiber) and its SVG fallback
-  pages/         Overview, Test runs, Attack library, Isolation lab, Audit trail, Risk reports
+  pages/         Overview, How it works, Guided demo, Test runs, Attack library, Isolation lab, Audit trail, Risk reports
 ```
 
 [flow.md](flow.md) traces execution end to end. [descision.md](descision.md) records why things are built the way they are.

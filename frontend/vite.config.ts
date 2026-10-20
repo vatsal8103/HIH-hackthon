@@ -12,7 +12,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: process.env.BAYORA_DEV_API ?? "http://127.0.0.1:8000", // override to point at another local API
         headers: { Authorization: `Bearer ${operatorToken}` },
         bypass: (req) => (/^\/api\/(red|blue|target)\//.test(req.url ?? "") ? false : undefined),
       },

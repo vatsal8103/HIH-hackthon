@@ -1,7 +1,9 @@
 import { useState } from "react";
 
 import { api } from "../api";
+import { Help, OutcomeTag, useRuleName } from "../components/Explain";
 import { Note, PageHead, RiskTag, VerdictTag, stagger } from "../components/ui";
+import { caseOutcome } from "../explain";
 import { navigate, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -10,9 +12,11 @@ export function AttackLibrary() {
   const { data: attacks, error } = useLoad(() => api.attacks(), []);
   const [selected, setSelected] = useState<Set<string> | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
+  const ruleName = useRuleName();
 
-  if (error) return <Note tone="error">{error}</Note>;
-  if (!attacks) return null;
+  if (error) return <Note tone="error">Could not load the attack library: {error}</Note>;
+  if (!attacks) return <p className="py-10 text-[14px] text-bone-500">Loading the attack library…</p>;
+  if (attacks.length === 0) return <Note tone="warn">The API returned an empty attack library, so there is nothing to run.</Note>;
 
   const chosen = selected ?? new Set(attacks.map((a) => a.id));
   const focus = attacks.find((a) => a.id === focusId) ?? attacks[0];
@@ -34,9 +38,14 @@ export function AttackLibrary() {
 
   return (
     <div className="space-y-12">
-      <PageHead eyebrow="Attack library" title={<>Seven controlled cases.</>}>
-        Synthetic prompts against a fictional clinic assistant. Each case declares the safety criteria it is judged by.
-        Nothing here targets a real system or produces harmful content.
+      <PageHead eyebrow="Attack library" title={<>The attacks Bayora tries.</>}>
+        Each case is a scripted attack prompt aimed at a fictional clinic assistant, plus the written safety rules its
+        answer is judged by. Nothing here targets a real system or produces harmful content. Pick some or all of them and
+        run a test.
+        <Help term="an attack case">
+          One attack case is one technique, for example overriding the AI's instructions or hiding a command in a document.
+          The benign control (BN-00) is a normal request: it checks that protections do not block ordinary use.
+        </Help>
       </PageHead>
 
       <div className="grid gap-10 lg:grid-cols-12 lg:gap-14">
@@ -128,13 +137,16 @@ export function AttackLibrary() {
               {focus.prompt}
             </pre>
 
-            <p className="label mt-9">Judged by</p>
+            <p className="label mt-9">Judged by these rules</p>
             <ul className="mt-3">
               {focus.criteria.map((id) => {
                 const criterion = meta?.criteria[id];
                 return (
                   <li key={id} className="hairline grid gap-1 border-t py-3 sm:grid-cols-[200px_1fr_auto] sm:gap-5">
-                    <span className="font-mono text-[11.5px] text-bone-200">{id}</span>
+                    <span>
+                      <span className="block text-[13px] text-bone-200">{criterion?.title ?? id}</span>
+                      <span className="block font-mono text-[10.5px] text-bone-500">{id}</span>
+                    </span>
                     <span className="text-[13px] text-bone-400">{criterion?.description}</span>
                     {criterion && <RiskTag risk={criterion.severity} />}
                   </li>
@@ -146,17 +158,22 @@ export function AttackLibrary() {
               <div>
                 <p className="label">Latest run</p>
                 {lastCase ? (
-                  <p className="mt-2 flex items-center gap-3 text-[13px] text-bone-400">
-                    <VerdictTag verdict={lastCase.baseline?.verdict} /> <span aria-hidden>→</span>
-                    <VerdictTag verdict={lastCase.retest?.verdict} />
-                    {lastCase.residual && <RiskTag risk={lastCase.residual.residual_risk} />}
-                  </p>
+                  <>
+                    <p className="mt-2">
+                      <OutcomeTag outcome={caseOutcome(lastCase, ruleName)} />
+                    </p>
+                    <p className="mt-1 flex items-center gap-3 text-[13px] text-bone-400">
+                      <VerdictTag verdict={lastCase.baseline?.verdict} /> <span aria-hidden>→</span>
+                      <VerdictTag verdict={lastCase.retest?.verdict} />
+                      {lastCase.residual && <RiskTag risk={lastCase.residual.residual_risk} />}
+                    </p>
+                  </>
                 ) : (
                   <p className="mt-2 text-[13px] text-bone-500">Not part of the latest run.</p>
                 )}
               </div>
               <div>
-                <p className="label">Guidance</p>
+                <p className="label">How to defend against it</p>
                 <p className="mt-2 text-[13px] leading-relaxed text-bone-400">{focus.recommendation}</p>
               </div>
             </div>
