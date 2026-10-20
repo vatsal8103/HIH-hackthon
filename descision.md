@@ -496,3 +496,148 @@ Other limits stay as before: one shared kernel, no credential expiry or rotation
 - `npm run build` and `docker compose config` pass.
 - Main stack rebuilt with `docker compose up -d --build`: all 7 services running, verify OK with 0 unanchored events. The UI rendered with no console errors.
 - The dev API was restarted on its existing PostgreSQL database; all 14 sessions are intact.
+
+---
+
+# Privilege reduction milestone (2026-10-20)
+
+Requested by the user:
+1. Reduce the control plane's ability to impersonate roles (R5).
+2. Apply database least privilege (R4).
+3. Add strict witness validation with a controlled recovery procedure (R2), and reduce the proxy's reach to host services (R1).
+4. Verify all of it. Preserve existing sessions, volumes, documentation history and the UI.
+
+## 2026-10-20 — Inspection findings and plan, recorded before editing
+- Status: Superseded by "Privilege reduction: what shipped" (same day). Kept as written.
+- Observed:
+  1. **Repository:** it is now a git repository (remote `origin` on GitHub) with a clean tree. No `.env`, database or witness data is tracked, and a scan of the history found no secret values. Nothing will be committed in this work.
+  2. **Backend credentials:** the backend container holds `BAYORA_TOKEN_{OPERATOR,RED,BLUE,TARGET}` in plaintext, plus `BAYORA_WITNESS_TOKEN` and a superuser `DATABASE_URL`. It uses the role tokens in `auth.role_for` (verification) and in `isolation._send`, which means it can impersonate every role.
+  3. **Database:** one role, `bayora` (superuser, `CREATEROLE`, `CREATEDB`), owns all five tables with every privilege. There are no sequences, and `public` grants `PUBLIC` usage only. The Docker database holds 9 sessions and 476 audit events, all to be preserved.
+  4. **Network experiment (throwaway network, cleaned up):** a container on a Docker Desktop bridge with `enable_ip_masquerade=false` still reached `host.docker.internal:8000` and `192.168.65.254:8000`, and published ports still worked. `gateway_mode_ipv4=isolated` is not supported. So no network option removes host reach from a container that carries a published port.
+  5. **nginx image:** built `--with-stream`, so an L4 relay needs no new image.
+- Plan, phase 1 (credentials):
+  - **Operator:** the backend stores only `sha256(operator token)` (`BAYORA_OPERATOR_TOKEN_SHA256`); the plaintext stays in nginx alone. Dev mode keeps the public default.
+  - **Red and Blue:** each agent gets its own Ed25519 signing key; the backend holds only their public keys, with several key ids allowed so keys can be rotated. Every role request carries a token signed by the role and checked by the backend:
+    - claims `role`, `act` (the exact route permission), `sid` (the path session), `req` (the request parameters), `iat`/`exp` (at most 60 s) and a one-time `jti`
+    - an embedded grant, signed by the control plane, naming the role, session and allowed actions, valid at most 120 s
+  - **Target:** holds no API credential.
+  - **Dispatch:** agents verify each dispatch grant with the control-plane public key (role, session, actions, expiry) before acting.
+  - **Revocation:** an operator route `POST /api/credentials/revocations` records a revoked key id in the database and the audit chain; it is checked on every request.
+  - **Audit evidence:** role-action audit events embed the role-signed token. Verification checks each signature, and once the first signed role event exists, an unsigned role event is an error.
+  - **Isolation checks:** data checks read the view functions directly. In ISO-01, the operator row uses the caller's own credential, the Red and Blue rows come from agent self-probes on the sentinel session, and the Target and anonymous rows carry no credential. Forged-signature probes are reported in the check detail.
+  - **Dependency:** `cryptography`, needed for Ed25519; the standard library has no asymmetric signatures.
+- Plan, phase 2 (database):
+  - A one-shot `migrate` service runs as the owner role `bayora` and creates a runtime role `bayora_app` (non-superuser) with only `SELECT`/`INSERT`/`UPDATE` where needed.
+  - `audit_events` gets `SELECT` and `INSERT` only, plus a trigger that refuses `UPDATE`, `DELETE` and `TRUNCATE`.
+  - The audit append lock moves from `LOCK TABLE` (which needs `UPDATE`/`DELETE`/`TRUNCATE`) to `pg_advisory_xact_lock`.
+  - The backend connects as `bayora_app` and skips DDL.
+  - The owner role, held only by `db` and `migrate`, remains the trusted component that can still mutate audit history, and only after disabling the trigger.
+- Plan, phase 3 (witness and proxy):
+  - **Extension proof:** each checkpoint carries the chain extension since the witness's effective latest checkpoint. The witness checks contiguous seqs, `prev_hash` links and recomputed hashes, with at most 500 events per checkpoint; the control plane publishes in batches.
+  - **Recovery:** append-only `supersede` records, written by a CLI run inside the witness container (requires `docker exec`, with no network endpoint, so the control plane cannot trigger it) and requiring a reason. Superseded records are kept and reported, never deleted.
+  - **Proxy split:** a credential-free `edge-relay` (nginx stream) holds the published port on `public`. The credential-holding nginx moves to the internal `edge` network only.
+
+## 2026-10-20 — Privilege reduction: what shipped
+- Status: Accepted. It implements the plan above, with the deviations listed below.
+
+- **Phase 1, credentials:**
+  - **Token library (`app/tokens.py`, new).** Ed25519 compact tokens: `b64u(claims).b64u(sig)`, with a `kid` in the claims. Verification uses a caller-supplied key table, so a key registered for one role cannot vouch for another.
+    - It depends on nothing else in the app and is copied into the agent image (`backend/Dockerfile`).
+    - **Why Ed25519:** the control plane must verify role tokens without being able to produce them, which rules out HMAC with a shared secret.
+    - **Dependency:** `cryptography>=44`.
+  - **Verification (`app/credentials.py`, new).** The receiving service checks all of the following on every signed request (`auth._signed`):
+    1. The signature against the claimed role's keys only.
+    2. The role uses signed credentials.
+    3. The kid is not revoked; the database is read on every request.
+    4. The permission table allows the role, else 403.
+    5. `typ`, `act` and `sid` match, and `req` equals the request body.
+    6. The token lives at most 60 s, allowing 5 s of clock skew.
+    7. The embedded control-plane grant matches role, session and permission, and lives at most 120 s.
+    8. The jti is one-time; this cache is in memory.
+  - **Agent side.** Agents verify each dispatch grant (`agents/common.check_grant`) before acting, and the target verifies grants on `/v1/respond` and `/v1/probe`.
+  - **Revocation:** `POST /api/credentials/revocations` (operator, `credentials:manage`) inserts the kid and appends a `credential.revoked` audit event. `GET /api/credentials` lists the trusted kids per role and the revoked ones.
+  - **Rotation (`app/keys.py --rotate red|blue|cp`, new):**
+    1. Generate a new key, keeping the old public key in the list.
+    2. Recreate the containers.
+    3. Revoke the old kid.
+  - **Retired CP keys:** `cp_public_keys()` also accepts the retired CP public keys in `BAYORA_CP_PUBLIC_KEYS`, so historical grants embedded in audit evidence still verify after a CP rotation.
+  - **Secrets bootstrap (`app/keys.py`):** it only appends missing values and never changes existing ones. It refuses an operator hash that doesn't match the operator token instead of overwriting it. It writes mode 600 and never prints a value. It names the `BAYORA_TOKEN_RED/BLUE/TARGET` lines that are no longer used but does not delete them.
+  - **Placement (`docker-compose.yml`):**
+
+    | Service | Holds |
+    |---|---|
+    | backend | Operator token SHA-256, its own CP signing key, Red/Blue public keys, witness token, `bayora_app` password |
+    | red-agent / blue-agent | Its own signing key, CP public key |
+    | target | CP public key only |
+    | frontend | Plaintext operator token |
+    | edge-relay | Nothing |
+
+  - **Startup refusal:** `auth.validate_tokens` refuses to start with any static role token, a plaintext operator token or missing keys.
+  - **Who reads what:**
+    - **Blue vs Red prompts.** Blue cannot read Red prompts: `blue:read` covers only redacted findings, and a Red-route call signed by Blue gets 403. This is enforced by the permission table and the signed role.
+    - **Target vs other sessions.** The target cannot read unrelated session data: it holds no API credential at all, and each dispatch carries only one session's grant and prompt text.
+- **Phase 2, database (`app/migrate.py`, new; compose `migrate` service):**
+  - **Migrate service:** it runs once with the owner's credentials and is the only container that holds `POSTGRES_PASSWORD` apart from `db`. It runs `init_db`.
+  - **Runtime role:** it creates or alters `bayora_app` with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`, which also rotates its password. It revokes `CREATE` on `public`, then grants exactly what the code issues:
+    - sessions and attempts: `SELECT`/`INSERT`/`UPDATE`
+    - defenses, isolation_checks, audit_events and credential_revocations: `SELECT`/`INSERT`
+    - **Why exactly these:** a grep of every write statement in `app/` showed no runtime `DELETE` anywhere.
+  - **Audit guard:** a trigger function, `bayora_audit_append_only`, refuses `UPDATE`/`DELETE` (row triggers) and `TRUNCATE` (a statement trigger) on `audit_events` for every role, including the owner.
+  - **Backend in Docker:** it runs with `BAYORA_RUN_MIGRATIONS=0`, connected as `bayora_app`.
+  - **Privilege report:** `db.runtime_privileges` now also reports `TRUNCATE` and whether the trigger is active, which feeds the "Database least privilege" control.
+- **Phase 3, witness and host reach:**
+  - **Extension proofs (`witness/app.py`).** A new checkpoint must carry events `head+1..seq` (at most 500), contiguous, linked to the anchored head hash, each with a recomputed hash, and ending at the claimed `head_hash`.
+    - **Validation on load:** checkpoint seqs must strictly increase, and a checkpoint record with unexpected fields fails validation.
+    - **Format:** the record format is unchanged, so the live 69-record log validated before the upgrade.
+    - **Batching:** the control plane (`checkpoint.publish`) publishes in batches of 500.
+  - **Refusing on conflict.** When the witness head does not match the local chain, nothing is posted and the result is "rejected".
+  - **Recovery (`witness/recover.py`, new).** `status`, and `supersede --from-index N --expect-head-seq S --reason ...`, run with `docker compose exec` in the witness container. There is no network endpoint, so the control plane cannot trigger it.
+    - **Append-only:** it appends a hash-linked `supersede` record naming the latest checkpoints still in force (only a suffix may be named) together with the reason.
+    - **Locking:** an `fcntl` file lock is shared with the API's append path.
+    - **Guards:** it refuses a stale view (`--expect-head-seq`), a short reason, or a log that fails validation.
+    - **Effect:** superseded records stay in the log, and `checkpoint.compare` still reports mismatches against them, with kind `superseded` and the reason. Verification stays red.
+  - **Proxy split (`edge-relay`, an nginx stream relay from `frontend/relay.conf` and the Dockerfile target `relay`):** the relay holds the published loopback port and forwards raw TCP. The credential-holding frontend is now on internal networks only.
+- **Deviations from the plan:**
+  1. **Network:** the relay reaches the frontend over a new internal `ui_net`, not over `edge`, because on `edge` the relay could also reach the backend.
+  2. **Recovery stays red:** mismatches against superseded checkpoints remain verification errors. The alternative, treating acknowledged mismatches as passing, would make a recovery turn verification green, which the milestone forbids.
+  3. **Stale-view guard:** recovery also requires `--expect-head-seq`, which was not in the plan.
+  4. **Tamper tests:** unit tests that tamper with audit rows now use an explicit `tamper()` helper (`SET session_replication_role = replica`, superuser only). They model an owner or superuser attacker who bypasses the trigger, rather than weakening the trigger.
+- **Threat model, configured vs independently tested:**
+
+  | Control | Tested by | Remaining gap or caveat |
+  |---|---|---|
+  | Control plane cannot act as Red/Blue | `test_control_plane_cannot_act_as_a_signed_role`: inside the backend container, a genuine grant plus a request signed with the CP key under Red's kid gets 401 | |
+  | Agents cannot act without a dispatch | Inside red-agent, a self-minted grant gets 401; a static legacy token gets 401 | |
+  | Signed request misuse | Unit tests: replay, expiry, session, action, parameters, foreign grant, revocation | |
+  | Runtime DB role is least-privileged | Compose test: grants read from `information_schema`; `UPDATE`/`DELETE`/`TRUNCATE`/`CREATE`/`DISABLE TRIGGER` from inside the backend get `InsufficientPrivilege` | |
+  | Credential placement | Compose test: secret values found in each container's environment | Configuration, but checked against the running containers |
+  | Credential-holding proxy has no egress or host route | Compose test: `nc` from the frontend | The relay itself can reach the host; it holds no secret |
+  | Witness refuses far-future, unlinked or forged checkpoints | Unit tests | |
+  | Recovery never deletes and never turns verification green | Unit and compose tests | |
+  | jti replay protection | | Configured only for a single API process; the jti cache is in memory and resets on restart, so a replay inside the 60 s window after a restart is not caught |
+
+- **What a fully compromised process still gets:**
+  - **Backend:** it holds the CP signing key and the runtime DB password. It can issue grants, but it cannot sign role requests. It can insert fabricated non-role audit events and mint new witness checkpoints that extend the chain, but it cannot rewrite anchored history. It can rewrite sessions and attempts rows; evidence digests in the chain detect that for anchored events.
+  - **Red or Blue agent:** it can act as its role only inside grants it receives (at most 120 s, one session).
+  - **Owner/superuser (`db`, `migrate`):** it can disable the trigger and rewrite everything; the witness detects a rewrite of anchored events.
+  - **Frontend:** it holds the operator token.
+  - **Witness volume writer:** it can alter the log; detected only if the record chain breaks.
+- **Verification:** all runs on 2026-10-20.
+
+  | Check | Result |
+  |---|---|
+  | `uv run pytest` (SQLite) | 102 passed, 12 skipped (Postgres-only) |
+  | Postgres suite (`TEST_DATABASE_URL=postgresql:///bayora_test?host=/tmp`) | 114 passed |
+  | `ruff check` and `ruff format --check` | Clean |
+  | `npm run build` (tsc and vite) | Clean |
+  | `docker compose config -q` | Valid |
+  | `scripts/compose-test.sh` | 61 passed |
+  | Main stack rebuild (`docker compose up -d --build --wait`) | Volumes kept; db container not recreated |
+
+  - **Live check after the rebuild:**
+    - All 9 earlier sessions were preserved; one live run makes 10.
+    - The chain verifies through 532 events: 157 legacy unsigned role events from before the switch, and 18 signed.
+    - The witness anchored through #532 using extension proofs.
+- **Restarts and pending work:**
+  - **Required:** recreating the containers that changed (all except `db`) was required and done.
+  - **Not done:** the dev API on :8000 (started 15:52, no `--reload`) still runs the earlier code, so it needs a manual restart to pick up this milestone. Vite needs no restart.
