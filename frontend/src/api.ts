@@ -135,7 +135,17 @@ export type CheckpointStatus = "ok" | "mismatch" | "unavailable" | "not-configur
 
 export interface ChainError {
   seq: number | null;
-  kind: "sequence" | "link" | "hash" | "evidence" | "checkpoint" | "truncated" | "missing" | "witness";
+  kind:
+    | "sequence"
+    | "link"
+    | "hash"
+    | "evidence"
+    | "credential"
+    | "checkpoint"
+    | "truncated"
+    | "missing"
+    | "superseded"
+    | "witness";
   message: string;
 }
 
@@ -145,6 +155,8 @@ export interface CheckpointVerification {
   anchored_seq?: number;
   head_seq?: number;
   unanchored_events?: number;
+  /** Checkpoints an operator took out of force during witness recovery; never deleted. */
+  superseded?: { index: number; seq: number; reason: string }[];
   errors: ChainError[];
 }
 

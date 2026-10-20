@@ -46,7 +46,11 @@ function CheckpointLine({ checkpoint }: { checkpoint: CheckpointVerification }) 
     ok: `Witness: chain matches all ${checkpoint.checkpoints} checkpoints, anchored through #${checkpoint.anchored_seq}${
       checkpoint.unanchored_events ? ` (${checkpoint.unanchored_events} newer events not yet anchored)` : ""
     }.`,
-    mismatch: "Witness: the stored chain disagrees with external checkpoints.",
+    mismatch: `Witness: the stored chain disagrees with external checkpoints.${
+      checkpoint.superseded?.length
+        ? ` ${checkpoint.superseded.length} checkpoint(s) were superseded in an operator recovery; their mismatches stay listed.`
+        : ""
+    }`,
     unavailable: "Witness unreachable: external verification could not run.",
     "not-configured": "No witness in this deployment: a full rewrite of the local chain would go undetected.",
   };
