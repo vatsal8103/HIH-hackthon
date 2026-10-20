@@ -118,10 +118,10 @@ def test_auth_failure_does_not_fall_through_to_the_handler(client, monkeypatch):
     def broken():
         raise RuntimeError("token store unavailable")
 
-    monkeypatch.setattr(auth_module, "role_tokens", broken)
+    monkeypatch.setattr(auth_module, "static_token", broken)
     from app.main import app
 
-    operator = {"Authorization": "Bearer dev-operator-token"}  # auth() itself reads role_tokens
+    operator = {"Authorization": "Bearer dev-operator-token"}  # auth() itself reads static_token
     response = TestClient(app, raise_server_exceptions=False).get("/api/attacks", headers=operator)
     assert response.status_code == 500
     assert "PI-01" not in response.text
@@ -142,51 +142,50 @@ def test_red_retest_submission_window(client):
     assert client.post(url, json=retest, headers=auth("red")).status_code == 409
 
 
+def docker_like_env() -> dict:
+    """A valid Docker configuration: hashes and public keys only, no role secrets."""
+    import hashlib
+
+    from app import tokens
+
+    env = {"BAYORA_OPERATOR_TOKEN_SHA256": hashlib.sha256(b"o" * 32).hexdigest()}
+    env["BAYORA_CP_SIGNING_KEY"], _ = tokens.generate("cp-1")
+    for role in ("RED", "BLUE"):
+        env[f"BAYORA_{role}_PUBLIC_KEYS"] = tokens.generate(f"{role.lower()}-1")[1]
+    return env
+
+
 @pytest.mark.parametrize(
-    ("env", "ok"),
+    ("change", "ok"),
     [
-        ({}, False),
-        (
-            {"BAYORA_TOKEN_OPERATOR": "o" * 32, "BAYORA_TOKEN_RED": "r" * 32, "BAYORA_TOKEN_BLUE": "b" * 32},
-            False,
-        ),
-        (
-            {
-                "BAYORA_TOKEN_OPERATOR": "o" * 32,
-                "BAYORA_TOKEN_RED": "r" * 32,
-                "BAYORA_TOKEN_BLUE": "b" * 32,
-                "BAYORA_TOKEN_TARGET": "t" * 32,
-            },
-            True,
-        ),
-        (
-            {
-                "BAYORA_TOKEN_OPERATOR": "s" * 32,
-                "BAYORA_TOKEN_RED": "s" * 32,
-                "BAYORA_TOKEN_BLUE": "b" * 32,
-                "BAYORA_TOKEN_TARGET": "t" * 32,
-            },
-            False,
-        ),
-        (
-            {
-                "BAYORA_TOKEN_OPERATOR": "o" * 32,
-                "BAYORA_TOKEN_RED": "r" * 32,
-                "BAYORA_TOKEN_BLUE": "b" * 32,
-                "BAYORA_TOKEN_TARGET": "t" * 32,
-                "BAYORA_WITNESS_URL": "http://witness:8000",
-            },
-            False,
-        ),
+        ({}, True),
+        ({"BAYORA_OPERATOR_TOKEN_SHA256": None}, False),  # hash missing
+        ({"BAYORA_OPERATOR_TOKEN_SHA256": "not-a-digest"}, False),
+        ({"BAYORA_TOKEN_OPERATOR": "o" * 32}, False),  # control plane must not hold the plaintext
+        ({"BAYORA_TOKEN_RED": "r" * 32}, False),  # static token beside signed credentials
+        ({"BAYORA_TOKEN_TARGET": "t" * 32}, False),  # the target holds no API credential
+        ({"BAYORA_RED_PUBLIC_KEYS": None}, False),
+        ({"BAYORA_BLUE_PUBLIC_KEYS": "blue-1:not-base64!"}, False),
+        ({"BAYORA_CP_SIGNING_KEY": None}, False),
+        ({"BAYORA_WITNESS_URL": "http://witness:8000"}, False),  # witness without a token
     ],
 )
-def test_required_tokens_refuse_weak_configuration(monkeypatch, env, ok):
-    for name in ("OPERATOR", "RED", "BLUE", "TARGET"):
-        monkeypatch.delenv(f"BAYORA_TOKEN_{name}", raising=False)
-    monkeypatch.delenv("BAYORA_WITNESS_URL", raising=False)
+def test_required_configuration_refuses_weak_or_excess_credentials(monkeypatch, change, ok):
+    names = [
+        "BAYORA_OPERATOR_TOKEN_SHA256",
+        "BAYORA_CP_SIGNING_KEY",
+        "BAYORA_RED_PUBLIC_KEYS",
+        "BAYORA_BLUE_PUBLIC_KEYS",
+        "BAYORA_WITNESS_URL",
+        "BAYORA_WITNESS_TOKEN",
+    ]
+    names += [f"BAYORA_TOKEN_{role}" for role in ("OPERATOR", "RED", "BLUE", "TARGET")]
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BAYORA_REQUIRE_TOKENS", "1")
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
+    for key, value in {**docker_like_env(), **change}.items():
+        if value is not None:
+            monkeypatch.setenv(key, value)
     if ok:
         auth_module.validate_tokens()
     else:

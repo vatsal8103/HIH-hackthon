@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from test_workflow import EXPECTED_RESIDUAL
 
 from agents import blue_agent, common
-from app import defenses, remote
+from app import credentials, defenses, remote
 from app.attacks import ATTACKS
 from app.target import CANARY
 
@@ -48,19 +48,18 @@ def test_each_agent_only_uses_and_sees_its_own_interface(agents, client, monkeyp
     calls = []
     original = common.api
 
-    def recording(method, path, token, json=None):
-        body = original(method, path, token, json)
-        calls.append((token, path, str(body)))
+    def recording(method, path, role, act, session_id, grant, json=None):
+        body = original(method, path, role, act, session_id, grant, json)
+        calls.append((role, path, str(body)))
         return body
 
     monkeypatch.setattr(common, "api", recording)
     run_to_completion(client)
 
     prompts = [a["prompt"][:40] for a in ATTACKS]
-    red_token, blue_token = auth("red")["Authorization"][7:], auth("blue")["Authorization"][7:]
-    assert {token for token, _, _ in calls} == {red_token, blue_token}
-    assert all(path.startswith("/api/red/") for token, path, _ in calls if token == red_token)
-    blue_calls = [(path, body) for token, path, body in calls if token == blue_token]
+    assert {role for role, _, _ in calls} == {"red", "blue"}
+    assert all(path.startswith("/api/red/") for role, path, _ in calls if role == "red")
+    blue_calls = [(path, body) for role, path, body in calls if role == "blue"]
     assert blue_calls and all(path.startswith("/api/blue/") for path, _ in blue_calls)
     for _, body in blue_calls:
         assert CANARY not in body
@@ -71,7 +70,8 @@ def test_blue_agent_receives_only_redacted_fields(agents, client):
     run = client.post("/api/runs", json={"attack_ids": ["PI-01", "II-04"]}, headers=auth("operator")).json()
     for _ in range(3):  # attack, respond, evaluate
         client.post(f"/api/runs/{run['id']}/advance", headers=auth("operator"))
-    reply = TestClient(blue_agent.app).post("/v1/act", json={"session_id": run["id"]}).json()
+    grant = credentials.issue_grant("blue", run["id"], ["blue:read", "blue:defend"])
+    reply = TestClient(blue_agent.app).post("/v1/act", json={"session_id": run["id"], "grant": grant}).json()
     assert set(reply["fields_seen"]) <= FINDING_FIELDS
     assert reply["applied"]
 

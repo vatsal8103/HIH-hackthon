@@ -1,10 +1,11 @@
 import os
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import remote
-from app.auth import role_tokens
+from app import remote, tokens
+from app.auth import static_token
 
 API_URL = "http://api.test"
 WITNESS_URL = "http://witness.test"
@@ -38,7 +39,16 @@ def client(tmp_path, monkeypatch):
 
         db.init_db()
         with db.connect() as conn:
-            for table in ("audit_events", "isolation_checks", "defenses", "attempts", "sessions"):
+            # Bypasses the append-only audit trigger (test_migrate installs it); superuser only.
+            conn.execute("SET session_replication_role = replica")
+            for table in (
+                "audit_events",
+                "isolation_checks",
+                "defenses",
+                "attempts",
+                "sessions",
+                "credential_revocations",
+            ):
                 conn.execute(f"DELETE FROM {table}")
     else:
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
@@ -49,7 +59,19 @@ def client(tmp_path, monkeypatch):
 
 
 def auth(role: str) -> dict:
-    return {"Authorization": f"Bearer {role_tokens()[role]}"}
+    return {"Authorization": f"Bearer {static_token(role)}"}
+
+
+@contextmanager
+def tamper():
+    """A connection with an attacker's full database control. On PostgreSQL it bypasses the
+    append-only audit trigger, as the owner or a superuser could; the runtime role cannot."""
+    from app import db
+
+    with db.connect() as conn:
+        if conn.is_pg:
+            conn.execute("SET session_replication_role = replica")
+        yield conn
 
 
 def run_to_completion(client, attack_ids=None) -> dict:
@@ -93,8 +115,15 @@ def agents(client, monkeypatch):
     from app.main import app
 
     monkeypatch.setenv("BAYORA_API_URL", API_URL)
-    monkeypatch.setenv("BAYORA_TOKEN_RED", role_tokens()["red"])
-    monkeypatch.setenv("BAYORA_TOKEN_BLUE", role_tokens()["blue"])
+    # Key placement mirrors Docker: the control plane gets its own signing key and only the
+    # public keys of Red and Blue; each agent gets only its own private key.
+    cp_private, cp_public = tokens.generate("cp-test")
+    monkeypatch.setenv("BAYORA_CP_SIGNING_KEY", cp_private)
+    monkeypatch.setenv("BAYORA_CP_PUBLIC_KEYS", cp_public)
+    for role in ("red", "blue"):
+        private, public = tokens.generate(f"{role}-test")
+        monkeypatch.setenv(f"BAYORA_{role.upper()}_SIGNING_KEY", private)
+        monkeypatch.setenv(f"BAYORA_{role.upper()}_PUBLIC_KEYS", public)
     # Keyed by API_URL, but sent with TestClient's default Host, which the API allowlists.
     monkeypatch.setitem(common.OVERRIDES, API_URL, TestClient(app))
     monkeypatch.setattr(common, "connect", fake_network(SEGMENTED))

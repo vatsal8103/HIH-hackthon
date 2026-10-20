@@ -1,6 +1,6 @@
 import itertools
 
-from conftest import auth, run_to_completion
+from conftest import auth, run_to_completion, tamper
 
 from app import db
 
@@ -34,7 +34,7 @@ def test_chain_links_and_verifies(client):
 
 def test_detects_modified_event(client):
     run_to_completion(client, ["PI-01"])
-    with db.connect() as conn:
+    with tamper() as conn:
         conn.execute("UPDATE audit_events SET details = ? WHERE seq = 4", ('{"verdict":"pass"}',))
 
     result = verify(client)
@@ -44,7 +44,7 @@ def test_detects_modified_event(client):
 
 def test_detects_deleted_event(client):
     run_to_completion(client, ["PI-01"])
-    with db.connect() as conn:
+    with tamper() as conn:
         conn.execute("DELETE FROM audit_events WHERE seq = 3")
 
     result = verify(client)
@@ -54,7 +54,7 @@ def test_detects_deleted_event(client):
 
 def test_detects_reordered_events(client):
     run_to_completion(client, ["PI-01"])
-    with db.connect() as conn:
+    with tamper() as conn:
         conn.execute("UPDATE audit_events SET seq = -1 WHERE seq = 3")
         conn.execute("UPDATE audit_events SET seq = 3 WHERE seq = 4")
         conn.execute("UPDATE audit_events SET seq = 4 WHERE seq = -1")
