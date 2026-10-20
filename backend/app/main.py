@@ -1,0 +1,393 @@
+"""Bayora API. Every route declares the single permission it needs (see auth.PERMISSIONS)."""
+
+import json
+import os
+from contextlib import asynccontextmanager
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from app import audit, checkpoint, db, defenses, evaluator, isolation, pipeline, providers, remote
+from app.attacks import ATTACKS, BY_ID
+from app.auth import PERMISSIONS, require, validate_tokens
+
+
+def deployment() -> dict:
+    agents = {role: "agent" if remote.agent_url(role) else "in-process" for role in remote.AGENT_ENV}
+    return {
+        "roles": agents,
+        "checkpoint": "witness" if checkpoint.configured() else "not-configured",
+    }
+
+
+def controls() -> list[dict]:
+    """The control register, computed from what this deployment actually runs."""
+    roles = deployment()["roles"]
+    in_process = sorted(role for role, mode in roles.items() if mode == "in-process")
+    isolated = not in_process
+    anchored = checkpoint.configured()
+    return [
+        {
+            "name": "Role-scoped API permissions",
+            "status": "implemented",
+            "detail": "Every route checks a per-role bearer token against one permission table.",
+        },
+        {
+            "name": "Blue Team redaction",
+            "status": "implemented",
+            "detail": "Blue Team receives criteria, severity and masked excerpts, never attack prompts.",
+        },
+        {
+            "name": "Hash-linked audit log",
+            "status": "implemented",
+            "detail": "Detects edited, deleted and reordered events, and evidence that no longer matches its digest.",
+        },
+        {
+            "name": "External audit checkpoint",
+            "status": "implemented" if anchored else "planned",
+            "detail": "A separate witness service keeps an append-only checkpoint log; verification compares every "
+            "checkpoint."
+            if anchored
+            else "Witness service exists but is not configured here, so a full chain rewrite would go undetected.",
+        },
+        {
+            "name": "Per-role container isolation",
+            "status": "implemented" if isolated else "planned",
+            "detail": "Red, Blue and Target run as separate non-root, read-only agent containers holding only "
+            "their own credential."
+            if isolated
+            else f"Not active here: {', '.join(in_process)} run inside the control-plane process. The Docker "
+            "stack runs them as separate containers.",
+        },
+        {
+            "name": "Role network segmentation",
+            "status": "implemented" if isolated else "simulated",
+            "detail": "One internal Docker network per role path; probed from inside each role container."
+            if isolated
+            else "Declared model only in this deployment.",
+        },
+        {
+            "name": "Operator credential kept out of the browser",
+            "status": "implemented",
+            "detail": "The proxy (nginx or the Vite dev server) injects it; the frontend bundle holds no token.",
+        },
+        {
+            "name": "Target model",
+            "status": "simulated",
+            "detail": "Deterministic rule-based provider, not an LLM. Real providers are planned behind the same "
+            "interface.",
+        },
+        {
+            "name": "Blue Team agent",
+            "status": "simulated",
+            "detail": "Fixed playbook mapping each violated criterion to a rule.",
+        },
+        {
+            "name": "Credential expiry and per-user identity",
+            "status": "planned",
+            "detail": "Static role tokens with no expiry or rotation.",
+        },
+        {
+            "name": "Kernel-level sandbox",
+            "status": "planned",
+            "detail": "Containers share the Docker VM kernel; gVisor or microVM runtimes are not used.",
+        },
+    ]
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_tokens()
+    if not remote.agent_url("target"):
+        providers.get_provider()  # refuse to start with an unknown provider
+    db.init_db()
+    yield
+
+
+app = FastAPI(title="Bayora API", version="0.1.0", lifespan=lifespan)
+
+# Answer only for known host names, so a DNS-rebinding page cannot drive the API from a
+# browser (dev tokens are public). Docker: nginx forwards 127.0.0.1/localhost, agents call
+# "backend", isolation probes use "bayora.internal".
+ALLOWED_HOSTS = os.environ.get(
+    "BAYORA_ALLOWED_HOSTS", "127.0.0.1,localhost,backend,bayora.internal,testserver"
+)
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=[h.strip() for h in ALLOWED_HOSTS.split(",") if h.strip()]
+)
+
+
+@app.exception_handler(pipeline.Conflict)
+def conflict_handler(_request: Request, exc: pipeline.Conflict):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(remote.RemoteError)
+def remote_handler(_request: Request, exc: remote.RemoteError):
+    # The stage's transaction has rolled back; nothing was done in-process instead.
+    return JSONResponse(status_code=502, content={"detail": f"Role service failure: {exc}"})
+
+
+class RunCreate(BaseModel):
+    attack_ids: list[str] | None = None
+
+
+class RedSubmit(BaseModel):
+    attack_id: str
+    phase: Literal["baseline", "retest"] = "baseline"
+
+
+class DefenseApply(BaseModel):
+    rule_id: str
+    criterion: str | None = None
+
+
+class TamperRequest(BaseModel):
+    mode: Literal["modify", "delete", "reorder", "rewrite"]
+    seq: int | None = None
+
+
+def _session(conn: db.DB, session_id: str) -> dict:
+    session = pipeline.get_session(conn, session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+def _attempt_out(row: dict) -> dict:
+    return {**row, "criteria": json.loads(row["criteria"]) if row["criteria"] else None}
+
+
+def _event_out(row: dict) -> dict:
+    return {**row, "details": json.loads(row["details"])}
+
+
+def _run_detail(conn: db.DB, session: dict) -> dict:
+    attempts = conn.all("SELECT * FROM attempts WHERE session_id = ? ORDER BY position", (session["id"],))
+    by_key = {(a["attack_id"], a["phase"]): _attempt_out(a) for a in attempts}
+    residual = {c["attack_id"]: c for c in (session["report"] or {}).get("cases", [])}
+    rules = conn.all(
+        "SELECT rule_id, criterion, created_at FROM defenses WHERE session_id = ? ORDER BY position",
+        (session["id"],),
+    )
+    return {
+        "id": session["id"],
+        "created_at": session["created_at"],
+        "stage": session["stage"],
+        "next_stage": pipeline.next_stage(session),
+        "status": "completed" if session["stage"] == "report" else "running",
+        "cases": [
+            {
+                "attack": BY_ID[attack_id],
+                "baseline": by_key.get((attack_id, "baseline")),
+                "retest": by_key.get((attack_id, "retest")),
+                "residual": residual.get(attack_id),
+            }
+            for attack_id in session["attack_ids"]
+        ],
+        "defenses": [{**r, **defenses.RULES[r["rule_id"]]} for r in rules],
+        "isolation": isolation.load_checks(conn, session["id"]),
+        "report": session["report"],
+    }
+
+
+# ------------------------------------------------------------------ operator
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "storage": db.engine(), "target": "simulated"}
+
+
+@app.get("/api/meta")
+def meta(_role: str = Depends(require("runs:read"))):
+    return {
+        "stages": pipeline.STAGES,
+        "criteria": evaluator.CRITERIA,
+        "rules": defenses.RULES,
+        "playbook": defenses.PLAYBOOK,
+        "controls": controls(),
+        "deployment": deployment(),
+        "permissions": {role: sorted(perms) for role, perms in PERMISSIONS.items()},
+        "storage": db.engine(),
+    }
+
+
+@app.get("/api/attacks")
+def list_attacks(_role: str = Depends(require("attacks:read"))):
+    return ATTACKS
+
+
+@app.get("/api/runs")
+def list_runs(_role: str = Depends(require("runs:read"))):
+    with db.connect() as conn:
+        rows = conn.all("SELECT id FROM sessions ORDER BY created_at DESC LIMIT 50")
+        sessions = [pipeline.get_session(conn, r["id"]) for r in rows]
+    return [
+        {
+            "id": s["id"],
+            "created_at": s["created_at"],
+            "stage": s["stage"],
+            "status": "completed" if s["stage"] == "report" else "running",
+            "attack_ids": s["attack_ids"],
+            "overall_risk": s["report"]["overall_risk"] if s["report"] else None,
+            "counts": s["report"]["counts"] if s["report"] else None,
+        }
+        for s in sessions
+    ]
+
+
+@app.post("/api/runs", status_code=201)
+def create_run(body: RunCreate, _role: str = Depends(require("runs:write"))):
+    requested = body.attack_ids if body.attack_ids is not None else [a["id"] for a in ATTACKS]
+    attack_ids = list(dict.fromkeys(requested))
+    unknown = [a for a in attack_ids if a not in BY_ID]
+    if unknown or not attack_ids:
+        raise HTTPException(
+            422, f"Unknown attack ids: {', '.join(unknown)}" if unknown else "No attacks selected"
+        )
+    with db.connect() as conn:
+        session_id = pipeline.create_session(conn, attack_ids)
+    with db.connect() as conn:
+        anchor = checkpoint.publish(conn)
+        return {**_run_detail(conn, _session(conn, session_id)), "checkpoint": anchor}
+
+
+@app.get("/api/runs/{session_id}")
+def get_run(session_id: str, _role: str = Depends(require("runs:read"))):
+    with db.connect() as conn:
+        return _run_detail(conn, _session(conn, session_id))
+
+
+@app.post("/api/runs/{session_id}/advance")
+def advance_run(session_id: str, request: Request, _role: str = Depends(require("runs:write"))):
+    with db.connect() as conn:
+        _session(conn, session_id)
+        stage = pipeline.advance(conn, session_id, request.app)
+    # Committed. Anchor the new head; a failure here is reported, never hidden.
+    with db.connect() as conn:
+        anchor = checkpoint.publish(conn)
+        return {"executed": stage, "run": _run_detail(conn, _session(conn, session_id)), "checkpoint": anchor}
+
+
+@app.get("/api/audit")
+def list_audit(
+    session_id: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+    _role: str = Depends(require("audit:read")),
+):
+    where, params = ("WHERE session_id = ?", (session_id, limit)) if session_id else ("", (limit,))
+    with db.connect() as conn:
+        rows = conn.all(
+            f"SELECT * FROM (SELECT * FROM audit_events {where} ORDER BY seq DESC LIMIT ?) recent ORDER BY seq",
+            params,
+        )
+    return [_event_out(r) for r in rows]
+
+
+@app.get("/api/audit/verify")
+def verify_audit(_role: str = Depends(require("audit:read"))):
+    with db.connect() as conn:
+        result = audit.verify(conn)
+        events = audit.load(conn)
+    anchor = checkpoint.verify(events)
+    result["checkpoint"] = anchor
+    if anchor["status"] in ("mismatch", "unavailable"):
+        result["errors"] = result["errors"] + anchor["errors"]
+        result["ok"] = False
+    return result
+
+
+@app.post("/api/audit/tamper-test")
+def tamper_test(body: TamperRequest, _role: str = Depends(require("audit:read"))):
+    with db.connect() as conn:
+        events = audit.load(conn)
+    check = None
+    if checkpoint.configured():
+        try:
+            records = checkpoint.fetch()["records"]
+        except remote.RemoteError as exc:
+            raise HTTPException(502, f"Witness unavailable: {exc}") from exc
+
+        def check(chain):
+            return checkpoint.compare(chain, records)
+
+    try:
+        return audit.tamper_test(events, body.mode, body.seq, check)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/isolation/matrix")
+def isolation_matrix(request: Request, _role: str = Depends(require("isolation:probe"))):
+    return isolation.probe_matrix(request.app)
+
+
+# ------------------------------------------------------------------ Red Team
+
+
+@app.get("/api/red/sessions/{session_id}/attempts")
+def red_attempts(session_id: str, _role: str = Depends(require("red:read"))):
+    with db.connect() as conn:
+        _session(conn, session_id)
+        return pipeline.red_view(conn, session_id)
+
+
+@app.post("/api/red/sessions/{session_id}/attempts", status_code=201)
+def red_submit(session_id: str, body: RedSubmit, _role: str = Depends(require("red:submit"))):
+    if body.attack_id not in BY_ID:
+        raise HTTPException(422, f"Unknown attack id: {body.attack_id}")
+    with db.connect() as conn:
+        attempt_id = pipeline.red_submit(conn, _session(conn, session_id), body.attack_id, body.phase)
+    return {"attempt_id": attempt_id}
+
+
+# ------------------------------------------------------------------ Blue Team
+
+
+@app.get("/api/blue/rules")
+def blue_rules(_role: str = Depends(require("blue:read"))):
+    return defenses.RULES
+
+
+@app.get("/api/blue/sessions/{session_id}/findings")
+def blue_findings(session_id: str, _role: str = Depends(require("blue:read"))):
+    with db.connect() as conn:
+        _session(conn, session_id)
+        findings = pipeline.blue_findings(conn, session_id)
+        # Every Blue read of findings is evidence of what the Blue Team was shown.
+        audit.append(
+            conn,
+            session_id,
+            "blue",
+            "blue.findings_read",
+            f"session:{session_id}",
+            {"findings": len(findings), "via": "api"},
+        )
+        return findings
+
+
+@app.post("/api/blue/sessions/{session_id}/defenses")
+def blue_defend(session_id: str, body: DefenseApply, _role: str = Depends(require("blue:defend"))):
+    if body.rule_id not in defenses.RULES:
+        raise HTTPException(404, f"Unknown rule: {body.rule_id}")
+    if body.criterion is not None and body.criterion not in evaluator.CRITERIA:
+        raise HTTPException(422, f"Unknown criterion: {body.criterion}")
+    with db.connect() as conn:
+        applied = pipeline.apply_defense(
+            conn, _session(conn, session_id), body.rule_id, body.criterion or "manual"
+        )
+    return {"rule_id": body.rule_id, "applied": applied}
+
+
+# ------------------------------------------------------------------ Target
+
+
+@app.get("/api/target/sessions/{session_id}/inbox")
+def target_inbox(session_id: str, _role: str = Depends(require("target:read"))):
+    with db.connect() as conn:
+        _session(conn, session_id)
+        return pipeline.target_inbox(conn, session_id)
