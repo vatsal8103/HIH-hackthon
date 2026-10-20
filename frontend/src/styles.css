@@ -1,0 +1,247 @@
+@import "tailwindcss";
+
+/* Bayora palette: graphite surfaces, warm bone type, moss for defense and success,
+   amber for warnings, rust for failures. Nothing else carries colour. */
+@theme {
+  --color-ink-950: #0d0d0c;
+  --color-ink-900: #121210;
+  --color-ink-850: #171715;
+  --color-ink-800: #1d1d1a;
+  --color-ink-700: #272622;
+  --color-ink-600: #34332e;
+  --color-ink-500: #45433d;
+
+  --color-bone-50: #efe9dc;
+  --color-bone-200: #d6cfbf;
+  --color-bone-400: #aaa292;
+  --color-bone-500: #8c8677;
+  --color-bone-700: #5e594f;
+
+  --color-moss-300: #b7c69c;
+  --color-moss-400: #9cae7e;
+  --color-moss-500: #7f9263;
+  --color-moss-800: #313b26;
+  --color-moss-900: #1b2117;
+
+  --color-amber-300: #e0b673;
+  --color-amber-400: #d1a05a;
+  --color-amber-900: #2b2214;
+
+  --color-rust-300: #d9897a;
+  --color-rust-400: #c9705f;
+  --color-rust-500: #b25a4a;
+  --color-rust-900: #2c1813;
+
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --ease-out-soft: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-out-soft: cubic-bezier(0.6, 0, 0.2, 1);
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    background: var(--color-ink-950);
+  }
+  body {
+    background: var(--color-ink-950);
+    color: var(--color-bone-50);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "tnum";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: var(--color-moss-800);
+    color: var(--color-bone-50);
+  }
+  /* Ligatures would turn markup such as <!-- --> into arrows inside prompts and hashes. */
+  pre,
+  code,
+  .font-mono,
+  .label {
+    font-variant-ligatures: none;
+  }
+  :focus-visible {
+    outline: 1px solid var(--color-moss-400);
+    outline-offset: 3px;
+  }
+}
+
+@layer components {
+  /* Small uppercase mono label used for section indices and metadata. */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-bone-500);
+  }
+  .hairline {
+    border-color: var(--color-ink-700);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    height: 2.5rem;
+    padding: 0 1.1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border: 1px solid var(--color-ink-600);
+    color: var(--color-bone-50);
+    transition:
+      background-color 180ms var(--ease-out-soft),
+      border-color 180ms var(--ease-out-soft),
+      color 180ms var(--ease-out-soft);
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--color-bone-500);
+    background: var(--color-ink-800);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: var(--color-bone-50);
+    border-color: var(--color-bone-50);
+    color: var(--color-ink-950);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-moss-300);
+    border-color: var(--color-moss-300);
+    color: var(--color-ink-950);
+  }
+  /* Crosshair ticks on the corners of technical panels. */
+  .ticks {
+    position: relative;
+  }
+  .ticks::before,
+  .ticks::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    pointer-events: none;
+    border-color: var(--color-bone-700);
+  }
+  .ticks::before {
+    top: -1px;
+    left: -1px;
+    border-top: 1px solid;
+    border-left: 1px solid;
+  }
+  .ticks::after {
+    right: -1px;
+    bottom: -1px;
+    border-right: 1px solid;
+    border-bottom: 1px solid;
+  }
+  /* Pending data: diagonal hatching rather than an empty box. */
+  .hatch {
+    background-color: var(--color-ink-850);
+    background-image: repeating-linear-gradient(135deg, var(--color-ink-600) 0 1px, transparent 1px 5px);
+  }
+  .dot-grid {
+    background-image: radial-gradient(var(--color-ink-600) 0.6px, transparent 0.6px);
+    background-size: 18px 18px;
+  }
+}
+
+/* Motion: one system, CSS only. Reveals are staggered with --i. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes draw {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+@keyframes sweep {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+@keyframes blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.reveal {
+  animation: rise 640ms var(--ease-out-soft) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+.route {
+  animation: rise 460ms var(--ease-out-soft) both;
+}
+.fade-in {
+  animation: fade 500ms var(--ease-out-soft) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+.draw-down {
+  transform-origin: top;
+  animation: draw 420ms var(--ease-out-soft) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+.sweep {
+  transform-origin: left;
+  animation: sweep 900ms var(--ease-in-out-soft) both;
+}
+.live-dot {
+  animation: blink 1.6s steps(2, jump-none) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+@media print {
+  html,
+  body {
+    background: #fff;
+    color: #111;
+  }
+  .no-print {
+    display: none !important;
+  }
+  /* Monochrome print: bone text classes would be near-invisible on paper. */
+  *,
+  *::before,
+  *::after {
+    color: #111 !important;
+    background: transparent !important;
+    border-color: #bbb !important;
+  }
+}
