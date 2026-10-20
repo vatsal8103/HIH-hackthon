@@ -63,7 +63,17 @@ SCHEMA = [
         prev_hash TEXT NOT NULL,
         hash TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS credential_revocations (
+        kid TEXT PRIMARY KEY,
+        revoked_at TEXT NOT NULL,
+        reason TEXT NOT NULL
+    )""",
 ]
+
+# Serialises audit appends on PostgreSQL. An advisory lock needs no table privilege, so the
+# runtime role can hold INSERT-only rights on audit_events (LOCK TABLE ... EXCLUSIVE would
+# need UPDATE, DELETE or TRUNCATE).
+AUDIT_LOCK_KEY = 0x0BA70A
 
 
 def database_url() -> str:
@@ -93,9 +103,24 @@ class DB:
     def lock_audit(self) -> None:
         """Serialise audit appends until this transaction commits."""
         if self.is_pg:
-            self.conn.execute("LOCK TABLE audit_events IN EXCLUSIVE MODE")
+            self.conn.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_LOCK_KEY,))
         elif not self.conn.in_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
+
+
+def runtime_privileges(db: "DB") -> dict | None:
+    """What the connected PostgreSQL role may do to the audit table (None on SQLite)."""
+    if not db.is_pg:
+        return None
+    return db.one(
+        "SELECT current_user AS role, rolsuper AS superuser, "
+        "has_table_privilege('audit_events', 'UPDATE') AS can_update, "
+        "has_table_privilege('audit_events', 'DELETE') AS can_delete, "
+        "has_table_privilege('audit_events', 'TRUNCATE') AS can_truncate, "
+        "EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_events_append_only' "
+        "AND tgenabled <> 'D') AS append_only_trigger "
+        "FROM pg_roles WHERE rolname = current_user"
+    )
 
 
 def _dict_row(cursor, row):

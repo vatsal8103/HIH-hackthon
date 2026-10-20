@@ -1,5 +1,5 @@
 # One build, three runtime images. Each copies only the code it runs:
-#   api     - control plane (all routes, database access, role tokens)
+#   api     - control plane (all routes, database access); also runs the one-shot migration
 #   agent   - Red, Blue or Target agent (no database driver, no control-plane code)
 #   witness - audit checkpoint log (no database driver, no control-plane code)
 FROM python:3.13-slim AS base
@@ -22,7 +22,7 @@ EXPOSE 8000
 CMD [".venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 FROM deps AS agent
-COPY app/__init__.py app/target.py app/providers.py ./app/
+COPY app/__init__.py app/target.py app/providers.py app/tokens.py ./app/
 COPY agents ./agents
 USER 10001
 EXPOSE 8000
