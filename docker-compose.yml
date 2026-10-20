@@ -1,0 +1,132 @@
+# Bayora with isolated roles. Every service gets its own minimal network path:
+#
+#   browser ──public──▶ frontend ──edge──▶ backend ──data──▶ db
+#                                            ├──red_net──────▶ red-agent
+#                                            ├──blue_net─────▶ blue-agent
+#                                            ├──target_net───▶ target
+#                                            └──witness_net──▶ witness
+#
+# All networks except `public` are internal (no egress), so agents can reach only the
+# backend, never each other, the database or the witness. This is container isolation on
+# one shared kernel (the Docker Desktop VM), not a kernel-level sandbox.
+# Secrets come only from .env (see .env.example); compose refuses to start without them.
+name: bayora
+
+x-hardened: &hardened
+  read_only: true
+  tmpfs: ["/tmp:size=16m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 128
+  mem_limit: 256m
+  cpus: 0.5
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bayora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: bayora
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [data]
+    read_only: true
+    tmpfs: ["/tmp:size=16m", "/var/run/postgresql:size=4m"]
+    cap_drop: [ALL]
+    # The entrypoint fixes data-directory ownership, then drops to the postgres user.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bayora"]
+      interval: 2s
+      retries: 20
+
+  backend:
+    <<: *hardened
+    build: { context: ./backend, target: api }
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgresql://bayora:${POSTGRES_PASSWORD:?}@db:5432/bayora
+      BAYORA_REQUIRE_TOKENS: "1"
+      BAYORA_TOKEN_OPERATOR: ${BAYORA_TOKEN_OPERATOR:?set in .env}
+      BAYORA_TOKEN_RED: ${BAYORA_TOKEN_RED:?set in .env}
+      BAYORA_TOKEN_BLUE: ${BAYORA_TOKEN_BLUE:?set in .env}
+      BAYORA_TOKEN_TARGET: ${BAYORA_TOKEN_TARGET:?set in .env}
+      BAYORA_RED_AGENT_URL: http://red-agent:8000
+      BAYORA_BLUE_AGENT_URL: http://blue-agent:8000
+      BAYORA_TARGET_AGENT_URL: http://target:8000
+      BAYORA_WITNESS_URL: http://witness:8000
+      BAYORA_WITNESS_TOKEN: ${BAYORA_WITNESS_TOKEN:?set in .env}
+    networks: [edge, data, red_net, blue_net, target_net, witness_net]
+    depends_on:
+      db: { condition: service_healthy }
+      witness: { condition: service_started }
+      red-agent: { condition: service_started }
+      blue-agent: { condition: service_started }
+      target: { condition: service_started }
+
+  red-agent:
+    <<: *hardened
+    build: { context: ./backend, target: agent }
+    command: [".venv/bin/uvicorn", "agents.red_agent:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      BAYORA_API_URL: http://backend:8000
+      BAYORA_TOKEN_RED: ${BAYORA_TOKEN_RED:?}
+    networks: [red_net]
+
+  blue-agent:
+    <<: *hardened
+    build: { context: ./backend, target: agent }
+    command: [".venv/bin/uvicorn", "agents.blue_agent:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      BAYORA_API_URL: http://backend:8000
+      BAYORA_TOKEN_BLUE: ${BAYORA_TOKEN_BLUE:?}
+    networks: [blue_net]
+
+  target:
+    <<: *hardened
+    build: { context: ./backend, target: agent }
+    command: [".venv/bin/uvicorn", "agents.target_agent:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      BAYORA_TARGET_PROVIDER: simulator # holds no API token at all
+    networks: [target_net]
+
+  witness:
+    <<: *hardened
+    build: { context: ./backend, target: witness }
+    environment:
+      BAYORA_WITNESS_DATA: /data
+      BAYORA_WITNESS_TOKEN: ${BAYORA_WITNESS_TOKEN:?}
+    volumes:
+      - witness-data:/data # mounted by the witness only
+    networks: [witness_net]
+
+  frontend:
+    <<: *hardened
+    build: ./frontend
+    tmpfs: ["/tmp:size=16m", "/etc/nginx/conf.d:size=1m,uid=101,gid=101"]
+    environment:
+      BAYORA_TOKEN_OPERATOR: ${BAYORA_TOKEN_OPERATOR:?} # injected by nginx; never in the bundle
+      NGINX_ENVSUBST_FILTER: "^BAYORA_"
+    ports:
+      - "127.0.0.1:${BAYORA_UI_PORT:-8080}:8080" # loopback only
+    networks: [public, edge]
+    depends_on: [backend]
+
+networks:
+  public: {} # the only network with outside connectivity; carries the published UI port
+  edge: { internal: true }
+  data: { internal: true }
+  red_net: { internal: true }
+  blue_net: { internal: true }
+  target_net: { internal: true }
+  witness_net: { internal: true }
+
+volumes:
+  pgdata:
+  witness-data:
