@@ -113,11 +113,76 @@ def verify_evidence(db: DB, events: list[dict]) -> list[dict]:
     return errors
 
 
+# Role actions and what the signing role must have authorised for each.
+ROLE_EVENTS = {
+    "red.baseline_submitted": ("red", "red:submit", ("attack_id", "phase")),
+    "red.retest_submitted": ("red", "red:submit", ("attack_id", "phase")),
+    "blue.defense_applied": ("blue", "blue:defend", ("rule_id",)),
+    "blue.findings_read": ("blue", "blue:read", ()),
+}
+
+
+def verify_credentials(events: list[dict]) -> tuple[list[dict], dict]:
+    """Check role-signed tokens embedded in role-action events.
+
+    A signed event must verify against that role's public key, name that role, action and
+    session, and authorise exactly the recorded parameters. Once the chain holds a signed
+    role event, every later role event must be signed too: an unsigned one would be a role
+    action the control plane recorded without the role's own authorisation.
+    """
+    from app import credentials, tokens  # local: credentials imports db, which this module also uses
+
+    errors, signed, unsigned, signing_started = [], 0, 0, False
+    for event in events:
+        spec = ROLE_EVENTS.get(event["event_type"])
+        if spec is None:
+            continue
+        role, action, fields = spec
+        details = json.loads(event["details"])
+        token = details.get("credential")
+        if token is None:
+            unsigned += 1
+            if signing_started:
+                errors.append(
+                    {
+                        "seq": event["seq"],
+                        "kind": "credential",
+                        "message": "Unsigned role event after signing began",
+                    }
+                )
+            continue
+        signing_started, problem = True, None
+        try:
+            claims = tokens.verify(token, credentials.role_keys(role))
+            grant = tokens.verify(claims.get("grant", ""), credentials.cp_public_keys())
+            if (claims.get("role"), claims.get("act"), claims.get("sid")) != (
+                role,
+                action,
+                event["session_id"],
+            ):
+                problem = "token was issued for another role, action or session"
+            elif grant.get("role") != role or grant.get("sid") != event["session_id"]:
+                problem = "embedded grant does not cover this role and session"
+            elif any(
+                claims.get("req", {}).get(f, "baseline" if f == "phase" else None) != details.get(f)
+                for f in fields
+            ):
+                problem = "token does not authorise the recorded parameters"
+        except tokens.TokenError as exc:
+            problem = f"credential does not verify ({exc})"
+        if problem:
+            errors.append({"seq": event["seq"], "kind": "credential", "message": problem})
+        else:
+            signed += 1
+    return errors, {"signed": signed, "unsigned": unsigned}
+
+
 def verify(db: DB) -> dict:
     events = load(db)
     result = verify_events(events)
-    evidence_errors = verify_evidence(db, events)
-    result["errors"] += evidence_errors
+    credential_errors, role_events = verify_credentials(events)
+    result["errors"] += verify_evidence(db, events) + credential_errors
+    result["role_events"] = role_events
     result["ok"] = not result["errors"]
     return result
 
