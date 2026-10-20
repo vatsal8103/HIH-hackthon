@@ -1,15 +1,25 @@
 # Bayora with isolated roles. Every service gets its own minimal network path:
 #
-#   browser ──public──▶ frontend ──edge──▶ backend ──data──▶ db
-#                                            ├──red_net──────▶ red-agent
-#                                            ├──blue_net─────▶ blue-agent
-#                                            ├──target_net───▶ target
-#                                            └──witness_net──▶ witness
+#   browser ──public──▶ edge-relay ──ui_net──▶ frontend ──edge──▶ backend ──data──▶ db
+#                                                                  ├──red_net──────▶ red-agent
+#                                                                  ├──blue_net─────▶ blue-agent
+#                                                                  ├──target_net───▶ target
+#                                                                  └──witness_net──▶ witness
 #
-# All networks except `public` are internal (no egress), so agents can reach only the
-# backend, never each other, the database or the witness. This is container isolation on
-# one shared kernel (the Docker Desktop VM), not a kernel-level sandbox.
-# Secrets come only from .env (see .env.example); compose refuses to start without them.
+# All networks except `public` are internal (no egress). Only edge-relay, which holds no
+# credential, sits on `public`; the frontend that injects the operator credential has no
+# route to the host or the internet. Agents reach only the backend, never each other, the
+# database or the witness. This is container isolation on one shared kernel (the Docker
+# Desktop VM), not a kernel-level sandbox.
+#
+# Credentials (all from .env; `cd backend && uv run python -m app.keys ../.env` creates
+# any that are missing without touching existing values):
+#   backend    operator token hash only, its own grant-signing key, Red/Blue public keys,
+#              witness token, runtime DB role bayora_app (no owner password)
+#   red/blue   their own signing key + the control plane's public key
+#   target     the control plane's public key only
+#   migrate    the DB owner password; runs once, then exits
+#   frontend   the plaintext operator token (to inject it); edge-relay holds nothing
 name: bayora
 
 x-hardened: &hardened
@@ -46,17 +56,33 @@ services:
       interval: 2s
       retries: 20
 
+  # One-shot: schema, the bayora_app role with exact grants, and the append-only audit
+  # trigger (app/migrate.py). The only container that ever holds the owner password.
+  migrate:
+    <<: *hardened
+    build: { context: ./backend, target: api }
+    command: [".venv/bin/python", "-m", "app.migrate"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://bayora:${POSTGRES_PASSWORD:?}@db:5432/bayora
+      BAYORA_APP_DB_PASSWORD: ${BAYORA_APP_DB_PASSWORD:?run app.keys to create it}
+    networks: [data]
+    depends_on:
+      db: { condition: service_healthy }
+
   backend:
     <<: *hardened
     build: { context: ./backend, target: api }
     mem_limit: 512m
     environment:
-      DATABASE_URL: postgresql://bayora:${POSTGRES_PASSWORD:?}@db:5432/bayora
+      DATABASE_URL: postgresql://bayora_app:${BAYORA_APP_DB_PASSWORD:?}@db:5432/bayora
+      BAYORA_RUN_MIGRATIONS: "0" # the runtime role cannot create tables; migrate did
       BAYORA_REQUIRE_TOKENS: "1"
-      BAYORA_TOKEN_OPERATOR: ${BAYORA_TOKEN_OPERATOR:?set in .env}
-      BAYORA_TOKEN_RED: ${BAYORA_TOKEN_RED:?set in .env}
-      BAYORA_TOKEN_BLUE: ${BAYORA_TOKEN_BLUE:?set in .env}
-      BAYORA_TOKEN_TARGET: ${BAYORA_TOKEN_TARGET:?set in .env}
+      BAYORA_OPERATOR_TOKEN_SHA256: ${BAYORA_OPERATOR_TOKEN_SHA256:?run app.keys to create it}
+      BAYORA_CP_SIGNING_KEY: ${BAYORA_CP_SIGNING_KEY:?run app.keys to create it}
+      BAYORA_CP_PUBLIC_KEYS: ${BAYORA_CP_PUBLIC_KEYS:?}
+      BAYORA_RED_PUBLIC_KEYS: ${BAYORA_RED_PUBLIC_KEYS:?}
+      BAYORA_BLUE_PUBLIC_KEYS: ${BAYORA_BLUE_PUBLIC_KEYS:?}
       BAYORA_RED_AGENT_URL: http://red-agent:8000
       BAYORA_BLUE_AGENT_URL: http://blue-agent:8000
       BAYORA_TARGET_AGENT_URL: http://target:8000
@@ -64,7 +90,7 @@ services:
       BAYORA_WITNESS_TOKEN: ${BAYORA_WITNESS_TOKEN:?set in .env}
     networks: [edge, data, red_net, blue_net, target_net, witness_net]
     depends_on:
-      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       witness: { condition: service_started }
       red-agent: { condition: service_started }
       blue-agent: { condition: service_started }
@@ -76,7 +102,8 @@ services:
     command: [".venv/bin/uvicorn", "agents.red_agent:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       BAYORA_API_URL: http://backend:8000
-      BAYORA_TOKEN_RED: ${BAYORA_TOKEN_RED:?}
+      BAYORA_RED_SIGNING_KEY: ${BAYORA_RED_SIGNING_KEY:?}
+      BAYORA_CP_PUBLIC_KEYS: ${BAYORA_CP_PUBLIC_KEYS:?}
     networks: [red_net]
 
   blue-agent:
@@ -85,7 +112,8 @@ services:
     command: [".venv/bin/uvicorn", "agents.blue_agent:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       BAYORA_API_URL: http://backend:8000
-      BAYORA_TOKEN_BLUE: ${BAYORA_TOKEN_BLUE:?}
+      BAYORA_BLUE_SIGNING_KEY: ${BAYORA_BLUE_SIGNING_KEY:?}
+      BAYORA_CP_PUBLIC_KEYS: ${BAYORA_CP_PUBLIC_KEYS:?}
     networks: [blue_net]
 
   target:
@@ -93,7 +121,8 @@ services:
     build: { context: ./backend, target: agent }
     command: [".venv/bin/uvicorn", "agents.target_agent:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      BAYORA_TARGET_PROVIDER: simulator # holds no API token at all
+      BAYORA_TARGET_PROVIDER: simulator
+      BAYORA_CP_PUBLIC_KEYS: ${BAYORA_CP_PUBLIC_KEYS:?} # verifies grants; holds no API credential
     networks: [target_net]
 
   witness:
@@ -108,18 +137,26 @@ services:
 
   frontend:
     <<: *hardened
-    build: ./frontend
+    build: { context: ./frontend, target: app }
     tmpfs: ["/tmp:size=16m", "/etc/nginx/conf.d:size=1m,uid=101,gid=101"]
     environment:
       BAYORA_TOKEN_OPERATOR: ${BAYORA_TOKEN_OPERATOR:?} # injected by nginx; never in the bundle
       NGINX_ENVSUBST_FILTER: "^BAYORA_"
+    networks: [ui_net, edge] # internal only: no egress, no route to the host
+    depends_on: [backend]
+
+  edge-relay:
+    <<: *hardened
+    build: { context: ./frontend, target: relay }
+    entrypoint: ["nginx", "-g", "daemon off;"] # skip the image's config-rewriting entrypoint scripts
     ports:
       - "127.0.0.1:${BAYORA_UI_PORT:-8080}:8080" # loopback only
-    networks: [public, edge]
-    depends_on: [backend]
+    networks: [public, ui_net]
+    depends_on: [frontend]
 
 networks:
   public: {} # the only network with outside connectivity; carries the published UI port
+  ui_net: { internal: true }
   edge: { internal: true }
   data: { internal: true }
   red_net: { internal: true }
