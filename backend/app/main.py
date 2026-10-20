@@ -7,12 +7,23 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app import audit, checkpoint, db, defenses, evaluator, isolation, pipeline, providers, remote
+from app import (
+    audit,
+    checkpoint,
+    credentials,
+    db,
+    defenses,
+    evaluator,
+    isolation,
+    pipeline,
+    providers,
+    remote,
+)
 from app.attacks import ATTACKS, BY_ID
-from app.auth import PERMISSIONS, require, validate_tokens
+from app.auth import PERMISSIONS, Principal, require, validate_tokens
 
 
 def deployment() -> dict:
@@ -20,6 +31,7 @@ def deployment() -> dict:
     return {
         "roles": agents,
         "checkpoint": "witness" if checkpoint.configured() else "not-configured",
+        "credentials": "signed" if credentials.signed_roles() else "static",
     }
 
 
@@ -27,13 +39,39 @@ def controls() -> list[dict]:
     """The control register, computed from what this deployment actually runs."""
     roles = deployment()["roles"]
     in_process = sorted(role for role, mode in roles.items() if mode == "in-process")
+    signed = sorted(credentials.signed_roles())
+    with db.connect() as conn:
+        privileges = db.runtime_privileges(conn)
+    least_privilege = bool(privileges) and not (
+        privileges["superuser"]
+        or privileges["can_update"]
+        or privileges["can_delete"]
+        or privileges["can_truncate"]
+    )
     isolated = not in_process
     anchored = checkpoint.configured()
     return [
         {
             "name": "Role-scoped API permissions",
             "status": "implemented",
-            "detail": "Every route checks a per-role bearer token against one permission table.",
+            "detail": "Every route checks the caller's credential against one permission table.",
+        },
+        {
+            "name": "Signed, short-lived role credentials",
+            "status": "implemented" if signed else "planned",
+            "detail": f"{' and '.join(signed).capitalize()} sign each request with their own key (60 s, one-time, "
+            "session-bound, inside a 120 s control-plane grant). The control plane holds only their public keys."
+            if signed
+            else "Not active here: dev mode uses static role tokens held by this process.",
+        },
+        {
+            "name": "Database least privilege",
+            "status": "implemented" if least_privilege else "planned",
+            "detail": f"Runtime role {privileges['role']} is not a superuser and holds no update, delete or "
+            f"truncate privilege on audit events; append-only trigger "
+            f"{'active' if privileges['append_only_trigger'] else 'missing'}. Tested by test_migrate.py and tests_compose."
+            if least_privilege
+            else "Not active here: the runtime database user can modify audit rows (SQLite, or a privileged role).",
         },
         {
             "name": "Blue Team redaction",
@@ -86,9 +124,9 @@ def controls() -> list[dict]:
             "detail": "Fixed playbook mapping each violated criterion to a rule.",
         },
         {
-            "name": "Credential expiry and per-user identity",
+            "name": "Per-user identity",
             "status": "planned",
-            "detail": "Static role tokens with no expiry or rotation.",
+            "detail": "Credentials identify roles, not people; the operator is one shared credential.",
         },
         {
             "name": "Kernel-level sandbox",
@@ -103,7 +141,8 @@ async def lifespan(_app: FastAPI):
     validate_tokens()
     if not remote.agent_url("target"):
         providers.get_provider()  # refuse to start with an unknown provider
-    db.init_db()
+    if os.environ.get("BAYORA_RUN_MIGRATIONS", "1") != "0":
+        db.init_db()  # in Docker the migrate service owns the schema; the runtime role cannot create tables
     yield
 
 
@@ -266,7 +305,7 @@ def get_run(session_id: str, _role: str = Depends(require("runs:read"))):
 def advance_run(session_id: str, request: Request, _role: str = Depends(require("runs:write"))):
     with db.connect() as conn:
         _session(conn, session_id)
-        stage = pipeline.advance(conn, session_id, request.app)
+        stage = pipeline.advance(conn, session_id, request.app, request.headers.get("authorization"))
     # Committed. Anchor the new head; a failure here is reported, never hidden.
     with db.connect() as conn:
         anchor = checkpoint.publish(conn)
@@ -322,8 +361,8 @@ def tamper_test(body: TamperRequest, _role: str = Depends(require("audit:read"))
 
 
 @app.post("/api/isolation/matrix")
-def isolation_matrix(request: Request, _role: str = Depends(require("isolation:probe"))):
-    return isolation.probe_matrix(request.app)
+def isolation_matrix(request: Request, _role: Principal = Depends(require("isolation:probe"))):
+    return isolation.probe_matrix(request.app, request.headers.get("authorization"))
 
 
 # ------------------------------------------------------------------ Red Team
@@ -337,11 +376,12 @@ def red_attempts(session_id: str, _role: str = Depends(require("red:read"))):
 
 
 @app.post("/api/red/sessions/{session_id}/attempts", status_code=201)
-def red_submit(session_id: str, body: RedSubmit, _role: str = Depends(require("red:submit"))):
+def red_submit(session_id: str, body: RedSubmit, principal: Principal = Depends(require("red:submit"))):
     if body.attack_id not in BY_ID:
         raise HTTPException(422, f"Unknown attack id: {body.attack_id}")
     with db.connect() as conn:
-        attempt_id = pipeline.red_submit(conn, _session(conn, session_id), body.attack_id, body.phase)
+        session = _session(conn, session_id)
+        attempt_id = pipeline.red_submit(conn, session, body.attack_id, body.phase, principal.credential)
     return {"attempt_id": attempt_id}
 
 
@@ -354,7 +394,7 @@ def blue_rules(_role: str = Depends(require("blue:read"))):
 
 
 @app.get("/api/blue/sessions/{session_id}/findings")
-def blue_findings(session_id: str, _role: str = Depends(require("blue:read"))):
+def blue_findings(session_id: str, principal: Principal = Depends(require("blue:read"))):
     with db.connect() as conn:
         _session(conn, session_id)
         findings = pipeline.blue_findings(conn, session_id)
@@ -365,22 +405,65 @@ def blue_findings(session_id: str, _role: str = Depends(require("blue:read"))):
             "blue",
             "blue.findings_read",
             f"session:{session_id}",
-            {"findings": len(findings), "via": "api"},
+            {"findings": len(findings), "via": "api", **pipeline.evidence(principal.credential)},
         )
         return findings
 
 
 @app.post("/api/blue/sessions/{session_id}/defenses")
-def blue_defend(session_id: str, body: DefenseApply, _role: str = Depends(require("blue:defend"))):
+def blue_defend(session_id: str, body: DefenseApply, principal: Principal = Depends(require("blue:defend"))):
     if body.rule_id not in defenses.RULES:
         raise HTTPException(404, f"Unknown rule: {body.rule_id}")
     if body.criterion is not None and body.criterion not in evaluator.CRITERIA:
         raise HTTPException(422, f"Unknown criterion: {body.criterion}")
     with db.connect() as conn:
-        applied = pipeline.apply_defense(
-            conn, _session(conn, session_id), body.rule_id, body.criterion or "manual"
-        )
+        session = _session(conn, session_id)
+        criterion = body.criterion or "manual"
+        applied = pipeline.apply_defense(conn, session, body.rule_id, criterion, principal.credential)
     return {"rule_id": body.rule_id, "applied": applied}
+
+
+# ------------------------------------------------------------------ credentials
+
+
+class Revocation(BaseModel):
+    kid: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+@app.get("/api/credentials")
+def list_credentials(_role: Principal = Depends(require("credentials:manage"))):
+    """Key ids the control plane trusts per role (public material only) and revoked ids."""
+    with db.connect() as conn:
+        revoked = conn.all("SELECT kid, revoked_at, reason FROM credential_revocations ORDER BY revoked_at")
+    return {
+        "roles": {role: sorted(credentials.role_keys(role)) for role in credentials.SIGNED_ROLES},
+        "revoked": revoked,
+    }
+
+
+@app.post("/api/credentials/revocations", status_code=201)
+def revoke_credential(body: Revocation, _role: Principal = Depends(require("credentials:manage"))):
+    """Refuse a role key id from now on. Takes effect on the next request; no restart needed."""
+    known = {kid for role in credentials.SIGNED_ROLES for kid in credentials.role_keys(role)}
+    if body.kid not in known:
+        raise HTTPException(404, f"Unknown key id: {body.kid}")
+    with db.connect() as conn:
+        if conn.one("SELECT kid FROM credential_revocations WHERE kid = ?", (body.kid,)):
+            raise HTTPException(409, f"{body.kid} is already revoked")
+        conn.execute(
+            "INSERT INTO credential_revocations (kid, revoked_at, reason) VALUES (?, ?, ?)",
+            (body.kid, audit.now(), body.reason),
+        )
+        audit.append(
+            conn,
+            None,
+            "operator",
+            "credential.revoked",
+            f"kid:{body.kid}",
+            {"kid": body.kid, "reason": body.reason},
+        )
+    return {"kid": body.kid, "revoked": True}
 
 
 # ------------------------------------------------------------------ Target

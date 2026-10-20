@@ -1,7 +1,10 @@
 """Isolation checks, each labelled by what actually enforces it.
 
-- "enforced": real HTTP requests through the ASGI app with each role's token, compared
-  with the permission table, plus the audit chain and witness checkpoint. Application layer.
+- "enforced": real HTTP requests through the ASGI app, compared with the permission table,
+  plus the audit chain and witness checkpoint. Application layer. The control plane sends
+  requests only with credentials it legitimately holds: the caller's own operator header,
+  dev-mode static tokens, or deliberately forged credentials (which must be refused). Rows
+  for roles with signed credentials come from each agent probing with its own key.
 - "network": TCP probes made from inside the Red, Blue and Target containers (only when
   role agents are configured), compared with NETWORK_POLICY. Network layer.
 - "configured": process controls observed from inside those containers (uid, capabilities,
@@ -15,9 +18,10 @@ import uuid
 
 import anyio
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from app import audit, checkpoint, defenses, remote, target
-from app.auth import ROLES, can, role_tokens
+from app import audit, checkpoint, credentials, defenses, remote, target, tokens
+from app.auth import PERMISSIONS, ROLES, can, static_token
 from app.db import DB
 
 # A session id that never exists: allowed roles get 404, denied roles get 401/403,
@@ -85,7 +89,25 @@ def evaluate_security(role: str, security: dict) -> list[str]:
     return problems
 
 
-def role_runtime_checks() -> list[tuple]:
+def agent_reports() -> dict:
+    """Each agent's self-probe, requested with a grant valid only for the sentinel session.
+
+    Returns role → report, or role → error string when the agent did not answer.
+    """
+    reports = {}
+    for role in remote.AGENT_ENV:
+        if not remote.agent_url(role):
+            continue
+        actions = ["agent:probe", *sorted(PERMISSIONS[role] if role in credentials.signed_roles() else [])]
+        payload = {"session_id": SENTINEL, "grant": credentials.issue_grant(role, SENTINEL, actions)}
+        try:
+            reports[role] = remote.call_agent(role, "/v1/probe", payload)
+        except remote.RemoteError as exc:  # fail closed: an unanswered probe is not a pass
+            reports[role] = str(exc)
+    return reports
+
+
+def role_runtime_checks(reports: dict) -> list[tuple]:
     """ISO-06/07: observed from inside role containers if all agents run, else declared or planned."""
     in_process = sorted(role for role in remote.AGENT_ENV if not remote.agent_url(role))
     if in_process:
@@ -117,11 +139,10 @@ def role_runtime_checks() -> list[tuple]:
         ]
     network, security, probes = [], [], 0
     for role in remote.AGENT_ENV:
-        try:
-            report = remote.call_agent(role, "/v1/probe", {})
-        except remote.RemoteError as exc:  # fail closed: an unanswered probe is not a pass
-            network.append(str(exc))
-            security.append(str(exc))
+        report = reports.get(role, f"{role} agent was not probed")
+        if isinstance(report, str):
+            network.append(report)
+            security.append(report)
             continue
         probes += len(report["reachability"])
         network += evaluate_probe(role, report)
@@ -178,12 +199,11 @@ def checkpoint_check(db: DB) -> tuple:
 
 
 async def _send(app, requests: list[tuple[str | None, str, str, dict | None]]) -> list[httpx.Response]:
-    tokens = role_tokens()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://bayora.internal") as client:
         responses = []
-        for role, method, path, body in requests:
-            headers = {"Authorization": f"Bearer {tokens[role]}"} if role else {}
+        for authorization, method, path, body in requests:
+            headers = {"Authorization": authorization} if authorization else {}
             responses.append(await client.request(method, path, json=body, headers=headers))
         return responses
 
@@ -196,46 +216,87 @@ def send(app, requests):
         return anyio.run(_send, app, requests)
 
 
-def probe_matrix(app) -> list[dict]:
-    roles = [*ROLES, None]
-    plan = [(role, *resource) for role in roles for resource in RESOURCES]
-    responses = send(
-        app, [(role, method, path.format(sid=SENTINEL), body) for role, _, method, path, body, _ in plan]
-    )
-    rows = []
-    for (role, name, method, path, _, permission), response in zip(plan, responses):
-        expected = role is not None and can(role, permission)
-        observed = response.status_code not in (401, 403)
-        rows.append(
-            {
+def _held_credential(role: str, operator_auth: str | None) -> str | None:
+    """A credential the control plane may legitimately present for `role`, or None."""
+    if role == "operator":
+        if operator_auth:
+            return operator_auth  # the caller's own credential, used for sentinel probes only
+        token = static_token("operator")
+        return f"Bearer {token}" if token else None
+    token = static_token(role)
+    return f"Bearer {token}" if token else None
+
+
+def probe_matrix(app, operator_auth: str | None = None, reports: dict | None = None) -> list[dict]:
+    """Status of every role × resource on SENTINEL, never using a role credential the control plane may not hold."""
+    if reports is None:
+        reports = agent_reports() if credentials.signed_roles() else {}
+    rows, plan = [], []
+    for role in [*ROLES, None]:
+        report = reports.get(role) if role in credentials.signed_roles() else None
+        agent_rows = (
+            {r["resource"]: r["status"] for r in report.get("permissions", [])}
+            if isinstance(report, dict)
+            else {}
+        )
+        credential = _held_credential(role, operator_auth) if role else None
+        source = "agent-signed" if agent_rows else ("held" if credential else "none")
+        for name, method, path, body, permission in RESOURCES:
+            row = {
                 "role": role or "anonymous",
                 "resource": name,
                 "method": method,
                 "path": path.split("?")[0],
                 "permission": permission,
-                "expected": "allow" if expected else "deny",
-                "status": response.status_code,
-                "ok": expected == observed,
+                "credential": source,
+                # A role with no credential in this deployment may do nothing at all.
+                "expected": "allow" if source != "none" and can(role, permission) else "deny",
             }
-        )
+            if agent_rows:
+                row["status"] = agent_rows.get(name, 0)
+            else:
+                plan.append((row, (credential, method, path.format(sid=SENTINEL), body)))
+            rows.append(row)
+    for (row, _), response in zip(plan, send(app, [request for _, request in plan])):
+        row["status"] = response.status_code
+    for row in rows:
+        observed = row["status"] not in (0, 401, 403)
+        row["ok"] = (row["expected"] == "allow") == observed
     return rows
 
 
-def run_checks(db: DB, app, session_id: str) -> list[dict]:
+def forged_probes(app) -> list[tuple[str, int]]:
+    """Credentials the control plane can make for a signed role must all be refused."""
+    if not credentials.signed_roles():
+        return []
+    role = min(credentials.signed_roles())
+    kid = min(credentials.role_keys(role))
+    impostor = Ed25519PrivateKey.generate()  # same key id, wrong key
+    grant = credentials.issue_grant(role, SENTINEL, sorted(PERMISSIONS[role]))
+    claims = {"typ": "req", "role": role, "act": f"{role}:read", "sid": SENTINEL, "req": {}, "grant": grant}
+    forged = tokens.sign({**claims, **tokens.lifetime(30), "jti": tokens.new_id()}, kid, impostor)
+    path = f"/api/{role}/sessions/{SENTINEL}/" + ("attempts" if role == "red" else "findings")
+    cases = [
+        ("token signed by a key the control plane generated", f"Bayora-Signed {forged}"),
+        ("control-plane grant presented as a role credential", f"Bayora-Signed {grant}"),
+    ]
+    responses = send(app, [(header, "GET", path, None) for _, header in cases])
+    return [(label, response.status_code) for (label, _), response in zip(cases, responses)]
+
+
+def run_checks(db: DB, app, session_id: str, operator_auth: str | None = None) -> list[dict]:
     attempts = db.all("SELECT attack_id, prompt FROM attempts WHERE session_id = ?", (session_id,))
-    matrix = probe_matrix(app)
-    red, inbox = send(
-        app,
-        [
-            ("red", "GET", f"/api/red/sessions/{session_id}/attempts", None),
-            ("target", "GET", f"/api/target/sessions/{session_id}/inbox", None),
-        ],
-    )
-    # ISO-02 inspects the Blue view directly. Reading it through the Blue API with the Blue
-    # token would record a Blue read that Blue never made; the route returns exactly this.
-    from app.pipeline import blue_findings  # local import: pipeline imports this module
+    reports = agent_reports()
+    matrix = probe_matrix(app, operator_auth, reports)
+    forged = forged_probes(app)
+    # Data checks inspect each role's view directly, exactly what its route returns, instead of
+    # reading it with that role's credential (which the control plane may not hold, and which
+    # would record reads the role never made).
+    from app.pipeline import blue_findings, red_view, target_inbox  # pipeline imports this module
 
     blue_view = json.dumps(blue_findings(db, session_id), ensure_ascii=False)
+    red_text = json.dumps(red_view(db, session_id), ensure_ascii=False)
+    inbox = target_inbox(db, session_id)
 
     mismatches = [f"{r['role']}→{r['resource']} ({r['status']})" for r in matrix if not r["ok"]]
     blue_leaks = [
@@ -247,30 +308,33 @@ def run_checks(db: DB, app, session_id: str) -> list[dict]:
         ]
         if needle in blue_view
     ]
-    red_leaks = [rule for rule in defenses.RULES if rule in red.text]
-    inbox_keys = {key for item in inbox.json() for key in item} if inbox.status_code == 200 else set()
+    red_leaks = [rule for rule in defenses.RULES if rule in red_text]
+    inbox_keys = {key for item in inbox for key in item}
     inbox_extra = inbox_keys - {"attempt_id", "phase", "prompt"}
-    inbox_labels = [a["attack_id"] for a in attempts if a["attack_id"] in inbox.text]
-    inbox_count = len(inbox.json()) if inbox.status_code == 200 else 0
+    inbox_labels = [a["attack_id"] for a in attempts if a["attack_id"] in json.dumps(inbox)]
+    inbox_count = len(inbox)
+    forged_accepted = [label for label, code in forged if code not in (401, 403)]
     chain = audit.verify(db)
 
-    def status(failures, expected_code=200, response=None):
-        if response is not None and response.status_code != expected_code:
-            return "fail"
+    def status(failures):
         return "fail" if failures else "pass"
+
+    sources = sorted({f"{r['role']}: {r['credential']}" for r in matrix if r["resource"] == RESOURCES[0][0]})
 
     checks = [
         (
             "ISO-01",
             "Role permission matrix",
             "enforced",
-            status(mismatches),
-            f"{len(matrix)} live requests across {len(ROLES)} roles and anonymous; "
+            status([*mismatches, *forged_accepted]),
+            f"{len(matrix)} requests across {len(ROLES)} roles and anonymous ({'; '.join(sources)}); "
             + (
                 f"mismatches: {', '.join(mismatches)}"
                 if mismatches
                 else "every status matched the permission table"
-            ),
+            )
+            + (f"; {len(forged)} forged credentials refused" if forged and not forged_accepted else "")
+            + (f"; FORGED CREDENTIAL ACCEPTED: {', '.join(forged_accepted)}" if forged_accepted else ""),
         ),
         (
             "ISO-02",
@@ -288,8 +352,8 @@ def run_checks(db: DB, app, session_id: str) -> list[dict]:
             "ISO-03",
             "Red Team is blind to defense configuration",
             "enforced",
-            status(red_leaks, response=red),
-            f"GET attempts as Red returned {red.status_code}; "
+            status(red_leaks),
+            "Red attempts view checked without using the Red credential; "
             + (
                 f"rule ids exposed: {', '.join(red_leaks)}"
                 if red_leaks
@@ -300,10 +364,8 @@ def run_checks(db: DB, app, session_id: str) -> list[dict]:
             "ISO-04",
             "Target sees pending prompts only",
             "enforced",
-            status(
-                [*inbox_extra, *inbox_labels, *(["answered prompts"] if inbox_count else [])], response=inbox
-            ),
-            f"GET inbox as Target returned {inbox.status_code}; {inbox_count} answered prompts exposed; "
+            status([*inbox_extra, *inbox_labels, *(["answered prompts"] if inbox_count else [])]),
+            f"Target inbox view checked without a Target credential; {inbox_count} answered prompts exposed; "
             f"fields: {', '.join(sorted(inbox_keys)) or 'none'}"
             + (
                 f"; unexpected: {', '.join([*inbox_extra, *inbox_labels])}"
@@ -319,7 +381,7 @@ def run_checks(db: DB, app, session_id: str) -> list[dict]:
             f"{chain['checked']} events checked before this stage; "
             + ("intact" if chain["ok"] else f"{len(chain['errors'])} errors"),
         ),
-        *role_runtime_checks(),
+        *role_runtime_checks(reports),
         checkpoint_check(db),
     ]
 

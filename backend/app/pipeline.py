@@ -11,11 +11,13 @@ agent acts only through its own role-scoped API with its own token.
 import json
 import uuid
 
-from app import audit, checkpoint, defenses, evaluator, isolation, providers, remote
+from app import audit, checkpoint, credentials, defenses, evaluator, isolation, providers, remote
 from app.attacks import BY_ID
 from app.db import DB
 
 STAGES = ["attack", "respond", "evaluate", "defend", "retest", "isolation", "report"]
+RED_ACTIONS = ["red:read", "red:submit"]  # what a Red dispatch grant allows
+BLUE_ACTIONS = ["blue:read", "blue:defend"]
 RISK_ORDER = ["none", "low", "medium", "high", "critical"]
 
 
@@ -54,14 +56,14 @@ def create_session(db: DB, attack_ids: list[str]) -> str:
     return session_id
 
 
-def advance(db: DB, session_id: str, app) -> str:
-    """Run the next stage. `app` is the ASGI app, used for live isolation probes."""
+def advance(db: DB, session_id: str, app, operator_auth: str | None = None) -> str:
+    """Run the next stage. `app` and the caller's `operator_auth` are used for isolation probes."""
     session = get_session(db, session_id)
     stage = next_stage(session)
     if stage is None:
         raise Conflict("Session already completed")
     if stage == "isolation":
-        isolation.run_checks(db, app, session_id)  # probes must run before this stage writes anything
+        isolation.run_checks(db, app, session_id, operator_auth)  # probes run before this stage writes
     else:
         STAGE_HANDLERS[stage](db, session)
     db.execute("UPDATE sessions SET stage = ? WHERE id = ?", (stage, session_id))
@@ -71,7 +73,18 @@ def advance(db: DB, session_id: str, app) -> str:
 # ---------------------------------------------------------------- role services
 
 
-def submit_attempt(db: DB, session_id: str, attack_id: str, phase: str) -> str:
+def evidence(credential: str | None) -> dict:
+    """Audit detail carrying the role-signed token that authorised an action, if there was one."""
+    return {"credential": credential} if credential else {}
+
+
+def dispatch(role: str, path: str, session_id: str, actions: list[str], payload: dict):
+    """Call a role agent with a grant scoped to this role, this session and these actions."""
+    grant = credentials.issue_grant(role, session_id, actions)
+    return remote.call_agent(role, path, {**payload, "session_id": session_id, "grant": grant})
+
+
+def submit_attempt(db: DB, session_id: str, attack_id: str, phase: str, credential: str | None = None) -> str:
     """Red Team: queue a library test case for the target."""
     attempt_id = new_id()
     prompt = BY_ID[attack_id]["prompt"]
@@ -86,12 +99,19 @@ def submit_attempt(db: DB, session_id: str, attack_id: str, phase: str) -> str:
         "red",
         f"red.{phase}_submitted",
         f"attempt:{attempt_id}",
-        {"attack_id": attack_id, "phase": phase, "prompt_sha256": audit.sha256(prompt)},
+        {
+            "attack_id": attack_id,
+            "phase": phase,
+            "prompt_sha256": audit.sha256(prompt),
+            **evidence(credential),
+        },
     )
     return attempt_id
 
 
-def red_submit(db: DB, session: dict, attack_id: str, phase: str = "baseline") -> str:
+def red_submit(
+    db: DB, session: dict, attack_id: str, phase: str = "baseline", credential: str | None = None
+) -> str:
     if phase == "retest":
         # Retests are allowed only once defenses are in place and before the retest stage ends.
         if session["stage"] != "defend":
@@ -100,7 +120,7 @@ def red_submit(db: DB, session: dict, attack_id: str, phase: str = "baseline") -
             raise Conflict(f"{attack_id} has no baseline attempt in this session")
         if _attempt(db, session["id"], attack_id, "retest"):
             raise Conflict(f"{attack_id} was already retested in this session")
-        return submit_attempt(db, session["id"], attack_id, "retest")
+        return submit_attempt(db, session["id"], attack_id, "retest", credential)
     if session["stage"] not in ("created", "attack"):
         raise Conflict("Attacks can only be submitted before the target responds")
     if attack_id in session["attack_ids"] and _attempt(db, session["id"], attack_id, "baseline"):
@@ -111,7 +131,7 @@ def red_submit(db: DB, session: dict, attack_id: str, phase: str = "baseline") -
             "UPDATE sessions SET attack_ids = ? WHERE id = ?",
             (json.dumps(session["attack_ids"]), session["id"]),
         )
-    return submit_attempt(db, session["id"], attack_id, "baseline")
+    return submit_attempt(db, session["id"], attack_id, "baseline", credential)
 
 
 def red_view(db: DB, session_id: str) -> list[dict]:
@@ -174,7 +194,7 @@ def active_rules(db: DB, session_id: str) -> list[str]:
     ]
 
 
-def apply_defense(db: DB, session: dict, rule_id: str, criterion: str) -> bool:
+def apply_defense(db: DB, session: dict, rule_id: str, criterion: str, credential: str | None = None) -> bool:
     """Blue Team: activate a rule for this session. Returns False if it was already active."""
     if session["stage"] not in ("evaluate", "defend"):
         raise Conflict("Defenses can only be applied after evaluation and before retest")
@@ -191,7 +211,7 @@ def apply_defense(db: DB, session: dict, rule_id: str, criterion: str) -> bool:
         "blue",
         "blue.defense_applied",
         f"defense:{defense_id}",
-        {"rule_id": rule_id, "criterion": criterion},
+        {"rule_id": rule_id, "criterion": criterion, **evidence(credential)},
     )
     return True
 
@@ -218,10 +238,12 @@ def _require_submitted(db: DB, session: dict, phase: str) -> None:
 
 def stage_attack(db: DB, session: dict) -> None:
     if remote.agent_url("red"):
-        remote.call_agent(
+        dispatch(
             "red",
             "/v1/act",
-            {"session_id": session["id"], "attack_ids": session["attack_ids"], "phase": "baseline"},
+            session["id"],
+            RED_ACTIONS,
+            {"attack_ids": session["attack_ids"], "phase": "baseline"},
         )
         _require_submitted(db, session, "baseline")
         return
@@ -230,7 +252,7 @@ def stage_attack(db: DB, session: dict) -> None:
             submit_attempt(db, session["id"], attack_id, "baseline")
 
 
-def _target_model():
+def _target_model(session_id: str):
     """The model the guardrails wrap: the isolated target agent if configured, else the local provider."""
     if not remote.agent_url("target"):
         provider = providers.get_provider()
@@ -238,7 +260,7 @@ def _target_model():
     info = {"provider": None, "kind": None}
 
     def model(text: str) -> str:
-        reply = remote.call_agent("target", "/v1/respond", {"prompt": text})
+        reply = dispatch("target", "/v1/respond", session_id, ["target:respond"], {"prompt": text})
         if not isinstance(reply, dict) or not isinstance(reply.get("response"), str):
             raise remote.RemoteError("target agent returned a malformed response")
         info.update(provider=str(reply.get("provider")), kind=str(reply.get("kind")))
@@ -249,7 +271,7 @@ def _target_model():
 
 def _respond(db: DB, session_id: str, phase: str) -> None:
     rules = active_rules(db, session_id)
-    model, info = _target_model()
+    model, info = _target_model(session_id)
     pending = db.all(
         "SELECT id, prompt FROM attempts WHERE session_id = ? AND phase = ? AND response IS NULL ORDER BY position",
         (session_id, phase),
@@ -319,7 +341,7 @@ def stage_defend(db: DB, session: dict) -> None:
     """Simulated Blue Team agent: works only from its redacted findings view."""
     if remote.agent_url("blue"):
         # The agent reads findings and applies rules through the Blue API; those calls are audited there.
-        remote.call_agent("blue", "/v1/act", {"session_id": session["id"]})
+        dispatch("blue", "/v1/act", session["id"], BLUE_ACTIONS, {})
         return
     findings = blue_findings(db, session["id"])
     audit.append(
@@ -337,10 +359,12 @@ def stage_defend(db: DB, session: dict) -> None:
 
 def stage_retest(db: DB, session: dict) -> None:
     if remote.agent_url("red"):
-        remote.call_agent(
+        dispatch(
             "red",
             "/v1/act",
-            {"session_id": session["id"], "attack_ids": session["attack_ids"], "phase": "retest"},
+            session["id"],
+            RED_ACTIONS,
+            {"attack_ids": session["attack_ids"], "phase": "retest"},
         )
         _require_submitted(db, session, "retest")
     else:
