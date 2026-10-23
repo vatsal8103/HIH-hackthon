@@ -743,3 +743,91 @@ Requested by the user:
   - **Unit and build:** `npm test` 19/19 and `npm run build` clean.
   - **Browser smoke test on throwaway SQLite stacks:** 69 assertions, all passing: 45 main, 8 failing run, 4 tamper, 10 offline, 2 fallback.
   - **Docker (frontend container only rebuilt):** the four metrics match `/api/runs/{latest}` at 1440 px and 390 px, with no overflow and no page errors. Live data was identical before and after: 15 sessions, 775 entries, 117 checkpoints, same witness-log hash.
+
+## 2026-10-21 — Optional Live AI target via a local Ollama model
+- Status: Accepted. Simulator mode remains the default and is unchanged; nothing was deployed to the running stack.
+
+- **Decision:** add `OllamaProvider` behind the existing provider interface (`app/providers.py`), selected with `BAYORA_TARGET_PROVIDER=ollama`.
+  - **Docker path:** the target reaches Ollama only through a restricted proxy in an opt-in compose profile.
+  - **How the network option was chosen:** the user chose among three options.
+
+    | Option | Outcome |
+    |---|---|
+    | Restricted proxy | Chosen |
+    | Ollama inside Docker | Rejected: no Apple GPU (very slow), a 2.5 GB model copy, and one-time internet access |
+    | Dev mode only | Rejected: no Docker demo |
+
+  - **Rejected outright:** putting the target on a non-internal network, which would give it the internet and the whole host.
+
+- **Inspection findings that shaped it:**
+  1. **The real model needs the scenario.** A real model knows only what it is told, while the simulator has the scenario built in. The live provider therefore sends the same synthetic scenario as a system prompt: the canary token, the patient record, and the refusal sentence. Without it the leak criteria could never fail.
+  2. **qwen3:4b (Ollama 0.35.1) always reasons:**
+     - **`think: false`:** ignored; the reasoning leaked into `message.content`.
+     - **`think: true`:** separates it into `message.thinking`. The provider uses `think: true` (configurable) and evaluates only `content`; reasoning text is never stored.
+  3. **The model's real cost (M3, GPU):**
+     - 22 to 244 seconds per answer; up to 3,763 tokens per answer, reasoning included.
+     - The first defaults (2,048 tokens, Ollama's 4,096-token context) produced empty answers. They became 6,144 / 8,192, with a 300 s timeout.
+     - nginx (1,800 s) and the edge relay (30 min) now wait for long stages.
+  4. **The evaluator is exact string matching written for the simulator.** For a live model it is heuristic:
+     - **Leak checks:** paraphrased, partial or encoded leaks are missed.
+     - **Refusals:** count only when the answer opens with the scenario sentence. The system prompt asks for it, and the check now tolerates leading quotes and curly apostrophes; simulator results are unchanged and tested.
+     - **Where this is stated:** reports for live runs, the control register, the UI notice and the README. No assurance beyond the scripted attacks is claimed.
+- **No silent fallback:**
+  - **Configuration errors** refuse startup.
+  - **Model failures** raise `ProviderError`, which becomes a 502 "Target provider failure", and the stage rolls back.
+  - **Readiness:** `/api/meta` reports `target.ready` and `detail` (Ollama reachable and model installed), and the UI warns before a run when the model is not ready.
+- **Network design (compose profile `live`):**
+  - **Topology:** `target` ↔ `ollama_net` (internal; target and proxy only) ↔ `ollama-proxy` (nginx, hardened, no credential) ↔ `ollama_egress` ↔ `host.docker.internal:11434`.
+  - **Proxy rules:** forwards only `POST /api/chat` and `GET /api/tags`; everything else gets 403.
+  - **Verification:** every agent probes `ollama-proxy` in each run (Red and Blue reaching it is an ISO-06 violation). `tests_compose/` checks reachability, the path rules and the proxy's hardening when the profile runs.
+  - **Accepted trade-offs:**
+    - the proxy has egress
+    - a compromised target can call `/api/chat` with any installed model (load on the host)
+    - the target joins the otherwise empty `ollama_net` even without the profile
+- **Recording and display:** audit events and reports record `provider` (`ollama/<model>`) and kind `live`. The report and run headers name the recorded target per run. The Overview's timing hint and the demo caveats follow the mode, and live runs get their own report disclaimer.
+- **Rejected:** a per-run mode selector in the UI (a new control surface for switching what answers mid-deployment), and a schema or JSON-body inspection layer in the proxy (njs; more moving parts than the threat warrants).
+- **Verified:**
+
+  | Check | Result |
+  |---|---|
+  | pytest, SQLite / PostgreSQL | see the verification log in flow.md |
+  | `tests/test_providers.py` | 35 tests: selection, startup validation, configuration, success, think-block removal, malformed and error replies, timeout, unavailable, readiness, grant before model, 502 without fallback in agent and in-process mode, recorded provider, simulator unchanged, refusal tolerance, probe policy |
+  | `compose-test.sh` with the live profile | 64 passed |
+  | `compose-test.sh` without the profile | 61 passed, 3 skipped |
+  | Real dev run, PS-05 and PR-06 | 94 s, recorded live; audit verified |
+  | Real Docker run through `ollama-proxy` (throwaway project, removed afterwards) | 71 s; ISO-06 passed; target events recorded `live` / `agent`; witness ok |
+
+## 2026-10-21 — Optional Groq provider (hosted model) behind a key-holding proxy
+- Status: Accepted. Simulator stays the default; Ollama is unchanged; nothing was deployed to the running stack.
+- **Decision:** `GroqProvider` in `app/providers.py`, selected with `BAYORA_TARGET_PROVIDER=groq`.
+  - **Model:** default `qwen/qwen3.8-27b`, verified available to this account through Groq's model list before configuring it.
+  - **API:** Groq's official OpenAI-compatible chat completions API, over httpx.
+  - **Errors and fallback:** errors are explained (401, 429 with the retry delay, other statuses, malformed replies, timeout, unreachable). There is no fallback between providers.
+- **Network and key placement:** the user chose a key-holding proxy over two alternatives.
+
+  | Option | Outcome |
+  |---|---|
+  | Key-holding proxy | Chosen |
+  | TLS pass-through relay with the key in the target | Rejected: the target would hold a credential, and there is no path restriction |
+  | Dev mode only | Rejected: no Docker demo |
+
+  - **What the proxy does** (`groq-proxy`, compose profile `groq`):
+    - sits on an internal `groq_net` shared only with the target
+    - holds `GROQ_API_KEY`, rendered into a tmpfs config at start
+    - adds the key and replaces `Host`, `Authorization` and `User-Agent`
+    - forwards only `POST /openai/v1/chat/completions` and `GET /openai/v1/models`
+    - verifies Groq's certificate, connects only to `api.groq.com`, and refuses to start without a key
+  - **The target** gets `BAYORA_GROQ_AUTH=proxy`, and startup refuses if a key is present there. The documented "target holds no API credential" still holds.
+  - **Dev mode:** the API process sends the key itself, over HTTPS only.
+- **Never exposing the key:**
+  - **Where it appears:** it is only ever put in the Authorization header.
+  - **Redaction:** ProviderError text is redacted.
+  - **Tested:** tests search API responses, `/api/meta`, `/healthz`, reports and audit events for a fake key. The compose suite adds `GROQ_API_KEY` to the private secrets it checks per container and in logs. A real Docker run found the key in no API response, no log, and not in the target's environment.
+- **Data leaving the machine:** prompts and the synthetic scenario go to Groq, a third party. The UI notice (`explain.liveHost`), the control register and live reports say so.
+- **Found while testing:** Groq's edge (Cloudflare) rejects Python urllib's default User-Agent with 403 (error 1010). httpx's default is accepted today, but both the proxy and the provider now send a fixed User-Agent, so behavior does not depend on the client library.
+- **Risks accepted and documented:**
+  - the proxy has internet egress and holds the key
+  - a compromised target can spend the Groq account through chat completions (any model the key allows), but cannot read the key or use other endpoints
+  - the target joins the otherwise empty `groq_net` without the profile
+  - the evaluator remains heuristic for live models
+- **Verified:** see flow.md §8, "Optional Groq provider".

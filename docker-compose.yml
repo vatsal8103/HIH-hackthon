@@ -20,6 +20,23 @@
 #   target     the control plane's public key only
 #   migrate    the DB owner password; runs once, then exits
 #   frontend   the plaintext operator token (to inject it); edge-relay holds nothing
+#
+# Live AI (optional): `docker compose --profile live up -d` with BAYORA_TARGET_PROVIDER=ollama
+# in .env adds ollama-proxy, the target's only path to Ollama on the host:
+#
+#   target ──ollama_net (internal, target only)──▶ ollama-proxy ──ollama_egress──▶ host.docker.internal:11434
+#
+# The proxy holds no credential and forwards only POST /api/chat and GET /api/tags. Red, Blue
+# and the backend are not on ollama_net. Without the profile nothing about the stack changes
+# except that the target joins the (otherwise empty) internal ollama_net.
+#
+# Live AI via Groq (optional): `docker compose --profile groq up -d` with BAYORA_TARGET_PROVIDER=groq
+# and GROQ_API_KEY in .env adds groq-proxy:
+#
+#   target (no key) ──groq_net (internal, target only)──▶ groq-proxy (holds the key) ──groq_egress──▶ api.groq.com:443
+#
+# groq-proxy adds the key, forwards only POST /openai/v1/chat/completions and GET /openai/v1/models,
+# verifies Groq's certificate and connects only to api.groq.com. The target never holds the key.
 name: bayora
 
 x-hardened: &hardened
@@ -86,6 +103,7 @@ services:
       BAYORA_RED_AGENT_URL: http://red-agent:8000
       BAYORA_BLUE_AGENT_URL: http://blue-agent:8000
       BAYORA_TARGET_AGENT_URL: http://target:8000
+      BAYORA_TARGET_TIMEOUT: ${BAYORA_TARGET_TIMEOUT:-20} # live model: above BAYORA_OLLAMA_TIMEOUT, e.g. 330
       BAYORA_WITNESS_URL: http://witness:8000
       BAYORA_WITNESS_TOKEN: ${BAYORA_WITNESS_TOKEN:?set in .env}
     networks: [edge, data, red_net, blue_net, target_net, witness_net]
@@ -121,9 +139,16 @@ services:
     build: { context: ./backend, target: agent }
     command: [".venv/bin/uvicorn", "agents.target_agent:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      BAYORA_TARGET_PROVIDER: simulator
+      BAYORA_TARGET_PROVIDER: ${BAYORA_TARGET_PROVIDER:-simulator} # "ollama" needs the live profile
+      BAYORA_OLLAMA_URL: http://ollama-proxy:11434
+      BAYORA_OLLAMA_MODEL: ${BAYORA_OLLAMA_MODEL:-qwen3:4b}
+      BAYORA_OLLAMA_TIMEOUT: ${BAYORA_OLLAMA_TIMEOUT:-300}
+      BAYORA_GROQ_URL: http://groq-proxy:8080
+      BAYORA_GROQ_AUTH: proxy # the key stays in groq-proxy; never passed to this container
+      BAYORA_GROQ_MODEL: ${BAYORA_GROQ_MODEL:-qwen/qwen3.8-27b}
+      BAYORA_GROQ_TIMEOUT: ${BAYORA_GROQ_TIMEOUT:-60}
       BAYORA_CP_PUBLIC_KEYS: ${BAYORA_CP_PUBLIC_KEYS:?} # verifies grants; holds no API credential
-    networks: [target_net]
+    networks: [target_net, ollama_net, groq_net]
 
   witness:
     <<: *hardened
@@ -145,6 +170,23 @@ services:
     networks: [ui_net, edge] # internal only: no egress, no route to the host
     depends_on: [backend]
 
+  ollama-proxy:
+    <<: *hardened
+    profiles: [live]
+    build: { context: ./frontend, target: ollama-proxy }
+    entrypoint: ["nginx", "-g", "daemon off;"] # skip the image's config-rewriting entrypoint scripts
+    networks: [ollama_net, ollama_egress]
+
+  groq-proxy:
+    <<: *hardened
+    profiles: [groq]
+    build: { context: ./frontend, target: groq-proxy }
+    tmpfs: ["/tmp:size=16m", "/etc/nginx/conf.d:size=1m,uid=101,gid=101"] # rendered config with the key
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-} # held here only; the proxy refuses to start without it
+      NGINX_ENVSUBST_FILTER: "^GROQ_API_KEY$"
+    networks: [groq_net, groq_egress]
+
   edge-relay:
     <<: *hardened
     build: { context: ./frontend, target: relay }
@@ -163,6 +205,10 @@ networks:
   blue_net: { internal: true }
   target_net: { internal: true }
   witness_net: { internal: true }
+  ollama_net: { internal: true } # target ↔ ollama-proxy only
+  ollama_egress: {} # ollama-proxy only: its route to host.docker.internal
+  groq_net: { internal: true } # target ↔ groq-proxy only
+  groq_egress: {} # groq-proxy only: its route to api.groq.com
 
 volumes:
   pgdata:
