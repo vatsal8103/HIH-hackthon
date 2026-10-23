@@ -1,0 +1,55 @@
+# groq-proxy: the target agent's only path to Groq (Live AI, compose profile "groq").
+# Rendered at container start by the image's envsubst step (NGINX_ENVSUBST_FILTER=^GROQ_API_KEY$)
+# into a tmpfs, so the key exists only in this container's memory and environment.
+#
+# Reachable only from the target (internal network groq_net). The target sends no key; this
+# proxy adds it, allows exactly two endpoints, verifies Groq's certificate and connects only to
+# api.groq.com. Any client-supplied Authorization header is replaced.
+resolver 127.0.0.11 valid=60s ipv6=off;
+
+server {
+    listen 8080;
+    access_log off;
+    server_tokens off;
+    client_max_body_size 64k; # one prompt plus the system prompt
+
+    set $groq api.groq.com;
+
+    # Answer one prompt.
+    location = /openai/v1/chat/completions {
+        limit_except POST { deny all; }
+        proxy_pass https://$groq;
+        proxy_set_header Host api.groq.com;
+        proxy_set_header Authorization "Bearer ${GROQ_API_KEY}";
+        proxy_set_header Cookie "";
+        proxy_set_header User-Agent "bayora-groq-proxy"; # one stable identity; Groq's edge rejects some client signatures
+        proxy_ssl_server_name on;
+        proxy_ssl_name api.groq.com;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_read_timeout 300s;
+    }
+
+    # Readiness: which models this account may use (read-only).
+    location = /openai/v1/models {
+        limit_except GET { deny all; }
+        proxy_pass https://$groq;
+        proxy_set_header Host api.groq.com;
+        proxy_set_header Authorization "Bearer ${GROQ_API_KEY}";
+        proxy_set_header Cookie "";
+        proxy_set_header User-Agent "bayora-groq-proxy"; # one stable identity; Groq's edge rejects some client signatures
+        proxy_ssl_server_name on;
+        proxy_ssl_name api.groq.com;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_read_timeout 10s;
+    }
+
+    location / {
+        return 403;
+    }
+}

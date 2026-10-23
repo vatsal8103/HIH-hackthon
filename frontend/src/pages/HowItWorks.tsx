@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { STAGES } from "../api";
 import { KindTag, Note, PageHead, SectionHead, stagger } from "../components/ui";
-import { OUTCOME_MEANING, PLAIN_STAGE, TONE_TEXT, targetNotice } from "../explain";
+import { OUTCOME_MEANING, PLAIN_STAGE, TONE_TEXT, liveHost, targetNotice } from "../explain";
 import { href } from "../hooks";
 import { useLab } from "../lab";
 
@@ -47,7 +47,11 @@ function Roles() {
               : meta?.target?.kind === "unknown"
                 ? "Here the target service did not answer, so what it runs is unknown."
                 : meta?.target
-                  ? `Here it is ${meta.target.provider ?? meta.target.kind}.`
+                  ? meta.target.kind === "live"
+                    ? liveHost(meta.target.provider) === "groq"
+                      ? `Here it is a real language model (${meta.target.provider}) hosted by Groq, a third-party service: the attack prompts and the synthetic scenario are sent there. Its answers can vary between runs.`
+                      : `Here it is a real language model (${meta.target.provider ?? "live"}) running locally through Ollama. Its answers can vary between runs.`
+                    : `Here it is ${meta.target.provider ?? meta.target.kind}.`
                   : "Loading what the target is…"}
           </p>
         </Role>

@@ -63,6 +63,7 @@ PRIVATE = {
     "BAYORA_CP_SIGNING_KEY",
     "BAYORA_RED_SIGNING_KEY",
     "BAYORA_BLUE_SIGNING_KEY",
+    "GROQ_API_KEY",  # only groq-proxy, and only with the groq profile
 }
 PUBLIC = {
     "BAYORA_OPERATOR_TOKEN_SHA256",
@@ -267,6 +268,8 @@ def test_each_container_holds_only_its_own_credentials():
         "frontend": {"BAYORA_TOKEN_OPERATOR"},
         "edge-relay": set(),
     }
+    if compose("ps", "-q", "groq-proxy", check=False).stdout.strip():
+        expected["groq-proxy"] = {"GROQ_API_KEY"}
     for service, allowed in expected.items():
         env = " ".join(inspect(service)["Config"]["Env"])
         held = {name for name in PRIVATE | PUBLIC if name in SECRETS and SECRETS[name] in env}
@@ -623,3 +626,132 @@ def test_witness_recovery_resumes_anchoring_but_keeps_reporting_the_conflict():
     result = http("GET", "/api/audit/verify")[1]
     assert result["ok"] is False and {e["kind"] for e in result["checkpoint"]["errors"]} == {"superseded"}
     assert result["checkpoint"]["superseded"] and result["checkpoint"]["unanchored_events"] == 0
+
+
+# ---------------------------------------------------------------- Live AI path (only with --profile live)
+
+
+def proxy_running() -> bool:
+    return bool(compose("ps", "-q", "ollama-proxy", check=False).stdout.strip())
+
+
+@pytest.fixture
+def live_proxy():
+    if not proxy_running():
+        pytest.skip("ollama-proxy not running; run with COMPOSE_PROFILES=live")
+
+
+def test_only_the_target_can_reach_the_ollama_proxy(live_proxy):
+    target = [("proxy", "ollama-proxy", 11434)]
+    assert probe_from("target", target)["proxy"] == "open"
+    for source in ("red-agent", "blue-agent", "backend", "witness", "frontend", "edge-relay"):
+        assert probe_from(source, target)["proxy"] != "open", source
+    for service in ("red-agent", "blue-agent", "backend", "frontend"):
+        assert not [
+            n for n in inspect(service)["NetworkSettings"]["Networks"] if n.endswith("_ollama_net")
+        ], service
+
+
+PROXY_CALL = """
+import sys, urllib.request, urllib.error
+method, path = sys.argv[1:3]
+req = urllib.request.Request("http://ollama-proxy:11434" + path, method=method, data=b"{}" if method == "POST" else None)
+try: print(urllib.request.urlopen(req, timeout=15).status)
+except urllib.error.HTTPError as e: print(e.code)
+"""
+
+
+def test_ollama_proxy_forwards_only_chat_and_tags(live_proxy):
+    def status(method, path):
+        return int(run_in("target", ".venv/bin/python", "-c", PROXY_CALL, method, path).stdout.strip())
+
+    assert status("GET", "/api/tags") != 403  # 200 with Ollama running on the host, 502 without
+    for method, path in [
+        ("POST", "/api/pull"),
+        ("DELETE", "/api/delete"),
+        ("POST", "/api/create"),
+        ("POST", "/api/copy"),
+        ("GET", "/api/version"),
+        ("GET", "/api/chat"),
+        ("POST", "/api/tags"),
+        ("POST", "/api/generate"),
+    ]:
+        assert status(method, path) == 403, (method, path)
+
+
+def test_ollama_proxy_is_hardened_and_holds_nothing(live_proxy):
+    config = inspect("ollama-proxy")
+    host = config["HostConfig"]
+    assert host["ReadonlyRootfs"] is True and "ALL" in host["CapDrop"]
+    assert "no-new-privileges:true" in host["SecurityOpt"]
+    assert not config["Mounts"]
+    env = " ".join(config["Config"]["Env"])
+    assert not [name for name in PRIVATE | PUBLIC if name in SECRETS and SECRETS[name] in env]
+    networks = {
+        name.split("_", 1)[1] for name in config["NetworkSettings"]["Networks"]
+    }  # "<project>_<network>"
+    assert networks == {"ollama_net", "ollama_egress"}
+
+
+# ---------------------------------------------------------------- Live AI via Groq (only with --profile groq)
+
+
+@pytest.fixture
+def groq_proxy():
+    if not compose("ps", "-q", "groq-proxy", check=False).stdout.strip():
+        pytest.skip("groq-proxy not running; run with COMPOSE_PROFILES=groq")
+
+
+GROQ_CALL = """
+import sys, urllib.request, urllib.error
+method, path = sys.argv[1:3]
+req = urllib.request.Request("http://groq-proxy:8080" + path, method=method, data=b"{}" if method == "POST" else None)
+try: print(urllib.request.urlopen(req, timeout=20).status)
+except urllib.error.HTTPError as e: print(e.code)
+"""
+
+
+def test_only_the_target_can_reach_the_groq_proxy(groq_proxy):
+    target = [("proxy", "groq-proxy", 8080)]
+    assert probe_from("target", target)["proxy"] == "open"
+    for source in ("red-agent", "blue-agent", "backend", "witness", "frontend", "edge-relay"):
+        assert probe_from(source, target)["proxy"] != "open", source
+    for service in ("red-agent", "blue-agent", "backend", "frontend"):
+        assert not [n for n in inspect(service)["NetworkSettings"]["Networks"] if n.endswith("_groq_net")], (
+            service
+        )
+
+
+def test_groq_proxy_adds_the_key_and_forwards_only_two_endpoints(groq_proxy):
+    def status(method, path):
+        return int(run_in("target", ".venv/bin/python", "-c", GROQ_CALL, method, path).stdout.strip())
+
+    # The target sends no key; 200 proves the proxy added it and verified Groq's certificate.
+    assert status("GET", "/openai/v1/models") == 200
+    for method, path in [
+        ("POST", "/openai/v1/files"),
+        ("POST", "/openai/v1/batches"),
+        ("POST", "/openai/v1/embeddings"),
+        ("POST", "/openai/v1/audio/transcriptions"),
+        ("GET", "/openai/v1/chat/completions"),
+        ("POST", "/openai/v1/models"),
+        ("GET", "/"),
+    ]:
+        assert status(method, path) == 403, (method, path)
+
+
+def test_groq_key_lives_only_in_the_hardened_proxy(groq_proxy):
+    config = inspect("groq-proxy")
+    host = config["HostConfig"]
+    assert (
+        host["ReadonlyRootfs"] is True
+        and "ALL" in host["CapDrop"]
+        and "no-new-privileges:true" in host["SecurityOpt"]
+    )
+    assert not config["Mounts"]
+    assert {name.split("_", 1)[1] for name in config["NetworkSettings"]["Networks"]} == {
+        "groq_net",
+        "groq_egress",
+    }
+    target_env = " ".join(inspect("target")["Config"]["Env"])
+    assert SECRETS["GROQ_API_KEY"] not in target_env and "BAYORA_GROQ_AUTH=proxy" in target_env

@@ -9,7 +9,7 @@ A secure AI red-teaming laboratory, built for Hack in Hills '26, Track 4: Securi
 Three roles take part:
 
 - **Red Team, the tester.** Sends scripted, harmless attack prompts from the attack library at a fictional clinic assistant.
-- **Target, the system under test.** Receives each prompt and answers it. Today it is a deterministic simulator (fixed rules, not a live AI model), and the UI says so based on what the backend reports.
+- **Target, the system under test.** Receives each prompt and answers it. By default it is a deterministic simulator (fixed rules, not a live AI model). Optional **Live AI mode** puts a real model in its place: local through Ollama (e.g. `qwen3:4b`), or hosted by Groq (e.g. `qwen/qwen3.8-27b`). The UI says which one answered, based on what the backend reports.
 - **Blue Team, the defender.** Sees only a redacted summary of what failed (never the attack prompts) and adds protections: input guards and an output filter.
 
 One test runs in seven recorded steps:
@@ -83,7 +83,7 @@ Create test → Red Team attack → Target response → Safety evaluation → Bl
 | Hash-linked audit log (edits, deletions, reordering, evidence drift) | **Implemented** | Unit tests with real database tampering |
 | External audit checkpoint (witness service) with extension proofs | **Implemented** (Docker; optional in dev) | Rewrite, truncation, deletion, outage, far-future and forged-proof tests, including a full owner rewrite in Docker |
 | Witness recovery that never deletes (append-only `supersede` records; verification stays red) | **Implemented** (Docker) | Unit tests and the CLI run inside the witness container |
-| Target model | **Simulated**: deterministic rules, not an LLM | Provider interface ready; no real provider implemented |
+| Target model | **Simulated** by default; **live** model via Ollama (local) or Groq (hosted) when configured (Live AI mode) | Provider tests with mocked Ollama and Groq; real two-attack runs in Docker through `ollama-proxy` and `groq-proxy` |
 | Blue Team agent | **Simulated**: a fixed playbook from violated criterion to rule | |
 | Per-user operator identity; shared jti cache across API restarts | **Planned** | |
 | Kernel-level sandbox (gVisor, microVM) | **Planned**: containers share the Docker VM kernel | |
@@ -166,20 +166,113 @@ BAYORA_WITNESS_URL=http://127.0.0.1:8100 uv run uvicorn app.main:app --port 8000
 
 Locally, the witness only checks the chain's history; it is not isolated from the API's user account.
 
+## Live AI mode (optional)
+
+The default target is the simulator. Live AI mode replaces it with a model served by Ollama on your machine. Nothing falls back to the simulator: if the model fails, the step fails with the reason, and the UI says so before you start ("the model is not ready").
+
+**What changes, and what does not.**
+- **What the model sees:** the same synthetic clinic scenario the simulator encodes, as a system prompt. That includes a confidential canary token and patient record, so the leak checks can actually fail.
+- **What stays the same:**
+  - input guardrails and output filtering still run in the control plane
+  - the target agent still checks the control-plane grant before calling the model
+  - every target event in the audit trail records the provider (for example `ollama/qwen3:4b`, kind `live`), and so does each report
+- **Reasoning:** for reasoning models, Ollama returns the reasoning separately (`think: true`); only the final answer is evaluated.
+
+**Local dev (no Docker).** With Ollama running (`ollama serve`) and the model installed (`ollama pull qwen3:4b`):
+
+```bash
+cd backend
+BAYORA_TARGET_PROVIDER=ollama uv run uvicorn app.main:app --port 8000   # Ollama defaults to http://127.0.0.1:11434
+```
+
+**Docker.** The target reaches Ollama only through `ollama-proxy`, an nginx container on an internal network (`ollama_net`) shared with nothing but the target. The proxy holds no credential, forwards only `POST /api/chat` and `GET /api/tags`, and returns 403 for everything else, including pull, delete, create and copy. Red, Blue and the backend have no path to it; the per-run isolation check (ISO-06) and `tests_compose/` both verify that. Add to `.env`:
+
+```bash
+BAYORA_TARGET_PROVIDER=ollama
+BAYORA_TARGET_TIMEOUT=330        # control plane → target, per answer; above BAYORA_OLLAMA_TIMEOUT
+# optional: BAYORA_OLLAMA_MODEL=qwen3:4b  BAYORA_OLLAMA_TIMEOUT=300
+```
+
+then `docker compose --profile live up -d --build`. To go back, remove those lines and run `docker compose up -d`; `docker compose --profile live stop ollama-proxy` stops the proxy.
+
+**Settings** (environment of the process that runs the target):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BAYORA_TARGET_PROVIDER` | `simulator` | `simulator` or `ollama` |
+| `BAYORA_OLLAMA_URL` | `http://127.0.0.1:11434` (Docker: `http://ollama-proxy:11434`) | Ollama base URL |
+| `BAYORA_OLLAMA_MODEL` | `qwen3:4b` | Installed model name |
+| `BAYORA_OLLAMA_THINK` | `true` | Separate reasoning; `false` for models without thinking (e.g. `llama3.2:3b`) |
+| `BAYORA_OLLAMA_TIMEOUT` | `300` | Seconds per answer |
+| `BAYORA_OLLAMA_MAX_TOKENS` | `6144` | Tokens per answer, reasoning included |
+| `BAYORA_OLLAMA_CONTEXT` | `8192` | Context window (`num_ctx`) |
+| `BAYORA_TARGET_TIMEOUT` | `20` | Control plane's wait for one target answer (backend env) |
+
+**For a demo,** choose one or two attacks in the Attack library (PS-05 and PR-06 took 22 and 36 s per answer here); a full run with qwen3:4b takes 20 minutes or more. `llama3.2:3b` (with `BAYORA_OLLAMA_THINK=false`) is much faster but a different model.
+
+### Groq (hosted)
+
+`BAYORA_TARGET_PROVIDER=groq` uses a model hosted by Groq through its OpenAI-compatible API (default `qwen/qwen3.8-27b`, verified available to this account on 2026-10-21; about 0.3 to 1 s per answer).
+
+**Data leaves your machine.** The attack prompts and the synthetic scenario (canary token, made-up patient record) are sent to Groq, a third party. The UI notice, the control register and each report say so.
+
+**The key** is read from `GROQ_API_KEY` on the server side only. It is never sent to the browser and never written to errors, logs, `/api/meta`, reports or audit events; tests search all of those for it.
+- **Docker:** only `groq-proxy` receives it. The target holds no key.
+- **Local dev:** the API process sends it itself, over HTTPS only.
+
+**Local dev:**
+
+```bash
+cd backend
+export GROQ_API_KEY="$(grep '^GROQ_API_KEY=' ../.env | cut -d= -f2-)"   # this shell only; not echoed
+BAYORA_TARGET_PROVIDER=groq uv run uvicorn app.main:app --port 8000
+```
+
+**Docker.** The target reaches Groq only through `groq-proxy`, an nginx container on an internal network (`groq_net`) shared with nothing but the target. The proxy:
+- holds the key and adds it to each request
+- forwards only `POST /openai/v1/chat/completions` and `GET /openai/v1/models`, and returns 403 for everything else (files, batches, embeddings, audio)
+- verifies Groq's TLS certificate and connects only to `api.groq.com`
+- refuses to start without a key
+
+Red, Blue and the backend have no path to it (per-run ISO-06 and `tests_compose/`). Add to `.env`:
+
+```bash
+BAYORA_TARGET_PROVIDER=groq
+BAYORA_TARGET_TIMEOUT=90
+# GROQ_API_KEY=...            already present
+# optional: BAYORA_GROQ_MODEL=qwen/qwen3.8-27b  BAYORA_GROQ_TIMEOUT=60
+```
+
+then `docker compose --profile groq up -d --build`. To go back, remove the first two lines and run `docker compose up -d`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GROQ_API_KEY` | (none) | Groq key; Docker: groq-proxy only |
+| `BAYORA_GROQ_MODEL` | `qwen/qwen3.8-27b` | Groq model id |
+| `BAYORA_GROQ_URL` | `https://api.groq.com` (Docker: `http://groq-proxy:8080`) | API base URL |
+| `BAYORA_GROQ_AUTH` | `key` (Docker: `proxy`) | Who adds the key: this process, or the proxy |
+| `BAYORA_GROQ_TIMEOUT` | `60` | Seconds per answer |
+| `BAYORA_GROQ_MAX_TOKENS` | `2048` | `max_completion_tokens` |
+| `BAYORA_GROQ_REASONING_FORMAT` | `parsed` | `parsed` or `hidden` keep reasoning out of the answer; `none` omits the field |
+
+Errors are explained and never replaced by another provider's answer: a rejected key (401), the rate limit (429, with the retry delay), other HTTP errors, a malformed reply, or a timeout.
+
 ## Tests and checks
 
 ```bash
 cd backend
-uv run pytest                     # 106 unit tests on SQLite (12 PostgreSQL-only tests skip)
-TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 118 on PostgreSQL (needs a superuser; creates role bayora_app_test)
+uv run pytest                     # 141 unit tests on SQLite (12 PostgreSQL-only tests skip)
+TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 153 on PostgreSQL (needs a superuser; creates role bayora_app_test)
 uv run ruff check . && uv run ruff format --check .
 
 cd ..
 ./scripts/compose-test.sh         # 61 container/network tests on a throwaway stack (bayora-test, port 18080)
+COMPOSE_PROFILES=live ./scripts/compose-test.sh   # also the 3 ollama-proxy tests (64)
+COMPOSE_PROFILES=groq ./scripts/compose-test.sh   # also the 3 groq-proxy tests (64; one makes a read-only call to Groq)
 
 cd frontend
 npm run build                     # TypeScript strict check + production build
-npm test                          # 17 tests: plain-language rules and API error handling (Node's built-in test runner)
+npm test                          # 20 tests: plain-language rules and API error handling (Node's built-in test runner)
 ```
 
 `compose-test.sh` builds a separate Compose project, runs `backend/tests_compose/` against it, and removes it and its volumes afterwards. It never touches the main `bayora` stack.
@@ -199,7 +292,8 @@ In Docker these static role tokens do not exist: Red and Blue must sign requests
 
 ## Known limitations and caveats
 
-- **The target is a simulator.** It follows fixed rules, so results show how the method works, not how a real model behaves. No live model provider is implemented; the UI shows "Demo environment" because `/api/meta` reports `target.kind: simulated`.
+- **By default the target is a simulator.** It follows fixed rules, so results show how the method works, not how a real model behaves; the UI shows "Demo environment" because `/api/meta` reports `target.kind: simulated`.
+- **Live AI mode is slow and only heuristically evaluated.** qwen3:4b reasons at length: 22 to 244 seconds per answer on an M3, about 20 to 25 minutes for a full seven-attack run. Its answers can vary between runs (temperature 0 and a fixed seed reduce, not remove, variation). The evaluator's exact-string checks miss paraphrased, partial or encoded leaks, and count a refusal only if it opens with the scenario's refusal sentence. Reasoning text is not evaluated.
 - **The Blue Team is a fixed playbook,** mapping each failed rule to one protection.
 - **Seven scripted attacks are not a security audit.** A passed test shows that one attack failed here, nothing about attacks that were not tried.
 - **Dev mode is weaker than Docker.** Locally the roles run inside the API process, there is no witness unless you start one, and the UI says so (Roles: in-process, Anchor: none, and the isolation checks marked simulated or planned). Container, network, credential and database-privilege controls exist only in the Docker stack.

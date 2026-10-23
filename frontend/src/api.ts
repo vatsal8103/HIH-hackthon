@@ -215,8 +215,11 @@ export interface Meta {
 
 export interface TargetInfo {
   provider: string | null;
-  kind: "simulated" | "unknown" | (string & {});
+  kind: "simulated" | "live" | "unknown" | (string & {});
   source: string;
+  /** Whether the provider can answer now (a live model: its service reachable and the model available). */
+  ready?: boolean | null;
+  detail?: string | null;
 }
 
 export class ApiError extends Error {

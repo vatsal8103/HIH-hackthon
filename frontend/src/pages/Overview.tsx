@@ -11,6 +11,7 @@ import {
   RISK_PLAIN,
   TONE_TEXT,
   caseOutcome,
+  liveHost,
   outcomeCounts,
   refusedStage,
   riskTone,
@@ -27,7 +28,7 @@ const textButton = "text-bone-200 underline decoration-ink-500 underline-offset-
 
 /** What Bayora does, the two actions, and the environment notice. */
 function Intro() {
-  const { run, playing, busy, start, resume, skip } = useLab();
+  const { run, playing, busy, start, resume, skip, meta } = useLab();
   const paused = run && !run.report && !busy ? run : null;
   return (
     <div className="flex flex-col">
@@ -64,6 +65,17 @@ function Intro() {
               Resume it
             </button>{" "}
             to finish the remaining steps.
+          </>
+        ) : meta?.target?.kind === "live" && liveHost(meta.target.provider) === "groq" ? (
+          "Sends every attack to the model hosted by Groq, a third party; a full run usually takes about a minute. Each run is saved with its audit record."
+        ) : meta?.target?.kind === "live" ? (
+          <>
+            Sends every attack to the live model. A local reasoning model can take minutes per answer, so a full run may
+            take 20 minutes or more; for a quick demo, choose one or two attacks in the{" "}
+            <a href={href("attacks")} className={textButton}>
+              Attack library
+            </a>
+            .
           </>
         ) : (
           "Sends every attack in the library, step by step, in about 15 seconds. Each run is saved with its audit record."

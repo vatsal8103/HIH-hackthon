@@ -3,7 +3,7 @@ import { useState, type ReactNode } from "react";
 import { api, type Attack, type RunCase, type RunDetail, type Verification } from "../api";
 import { OutcomeTag, ResponseText, TargetNotice, Technical, guardLine, useRuleName } from "../components/Explain";
 import { Note, PageHead, RiskTag, VerdictTag, dateTime, shortId } from "../components/ui";
-import { PLAIN_STAGE, RISK_PLAIN, TONE_TEXT, caseOutcome, checkpointPlain, eventPlain, isolationCounts } from "../explain";
+import { PLAIN_STAGE, RISK_PLAIN, TONE_TEXT, caseOutcome, checkpointPlain, eventPlain, isolationCounts, liveHost } from "../explain";
 import { href, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -329,7 +329,6 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
   const report = run.report!;
   const risk = item.residual?.residual_risk;
   const isolation = isolationCounts(run.isolation);
-  const { meta } = useLab();
   return (
     <>
       <dl className="space-y-4">
@@ -355,8 +354,12 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
           {isolation.untested ? `; ${isolation.untested} not tested in this deployment.` : "."}
         </Field>
         <Field term="Caveats">
-          {meta?.target?.kind === "simulated" ? "The target is a simulator, not a live AI model. " : ""}A passed test shows that
-          this attack failed here, not that the AI is safe against attacks that were not tried.
+          {report.deployment?.target_kind === "simulated"
+            ? "The target in this run was a simulator, not a live AI model. "
+            : report.deployment?.target_kind === "live"
+              ? `The target in this run was a live model (${report.deployment.target_provider}); its answers can vary between runs and the checks are heuristics. `
+              : ""}
+          A passed test shows that this attack failed here, not that the AI is safe against attacks that were not tried.
         </Field>
       </dl>
       <div className="mt-6 flex flex-wrap gap-3">
@@ -382,7 +385,7 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
 }
 
 export function Demo() {
-  const { run, online } = useLab();
+  const { run, online, meta } = useLab();
   const { data: attacks, error } = useLoad(() => api.attacks(), []);
   const [step, setStep] = useState(0);
   const [selectedId, setSelectedId] = useState(DEFAULT_CASE);
@@ -419,7 +422,11 @@ export function Demo() {
           <p>“A Red Team sends scripted attacks: overriding instructions, role-play jailbreaks, hidden instructions in documents. The target answers, and every answer is checked against written safety rules.”</p>
           <p>“Then a Blue Team, which only sees a redacted summary, adds protections, and every attack runs again. So we can show which defenses actually helped, which only hid the problem, and what still fails.”</p>
           <p>“Everything is recorded in a hash-linked audit trail, and a separate witness keeps checkpoints, so changes to the record are detected. In the Docker version the roles run in separate containers and can only reach what they're allowed to.”</p>
-          <p>“Today the target is a deterministic simulator, and we say so on screen. The point is the method: attack, measure, defend, retest, and keep the evidence.”</p>
+          <p>
+            {meta?.target?.kind === "live"
+              ? `“Today ${liveHost(meta.target.provider) === "groq" ? "a model hosted by Groq" : "a local language model"}, ${meta.target.provider}, answers as the target. Its answers can vary, and our checks are heuristics, so a pass is evidence about these attacks only. The point is the method: attack, measure, defend, retest, and keep the evidence.”`
+              : "“Today the target is a deterministic simulator, and we say so on screen. The point is the method: attack, measure, defend, retest, and keep the evidence.”"}
+          </p>
         </div>
       </details>
 

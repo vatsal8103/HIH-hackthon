@@ -57,6 +57,8 @@ FORBIDDEN_FLOWS = [("red", "blue"), ("blue", "red"), ("target", "red"), ("target
 # Which compose services each role container may reach over the network when agents run.
 # Target shares its segment with the control plane (which calls it) but holds no token.
 NETWORK_POLICY = {"red": {"control-plane"}, "blue": {"control-plane"}, "target": {"control-plane"}}
+# Paths a role may have but need not: the target reaches its model proxy only in Live AI mode.
+OPTIONAL_PATHS = {"red": set(), "blue": set(), "target": {"ollama-proxy", "groq-proxy"}}
 REACHABLE = {"connected", "refused"}  # a refused connection still proves a network path
 
 
@@ -64,6 +66,8 @@ def evaluate_probe(role: str, report: dict) -> list[str]:
     """Policy violations in an agent's probe report: unexpected paths and missing allowed ones."""
     problems = []
     for item in report["reachability"]:
+        if item["name"] in OPTIONAL_PATHS[role]:
+            continue
         reachable = item["outcome"] in REACHABLE
         allowed = item["name"] in NETWORK_POLICY[role]
         if reachable != allowed:

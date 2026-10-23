@@ -81,7 +81,17 @@ function SystemStatus() {
       </div>
       <div className="flex justify-between gap-3">
         <dt>Target</dt>
-        <dd className={!meta ? "" : meta.target?.kind === "unknown" ? "text-rust-300" : meta.target?.kind === "simulated" ? "text-amber-300" : "text-bone-200"}>
+        <dd
+          className={
+            !meta
+              ? ""
+              : meta.target?.kind === "unknown" || meta.target?.ready === false
+                ? "text-rust-300"
+                : meta.target?.kind === "simulated"
+                  ? "text-amber-300"
+                  : "text-bone-200"
+          }
+        >
           {meta ? (meta.target?.kind ?? "not reported") : "…"}
         </dd>
       </div>

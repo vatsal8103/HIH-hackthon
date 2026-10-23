@@ -194,3 +194,21 @@ test("the simulated-target notice says deterministic rules, not a live AI model"
   assert.match(notice.text, /deterministic rules/);
   assert.match(notice.text, /not a live AI model/);
 });
+
+test("live mode says so, and an unready model is a failure warning, not a reassurance", () => {
+  const live = targetNotice({ provider: "ollama/qwen3:4b", kind: "live", source: "target agent", ready: true, detail: null })!;
+  assert.match(live.text, /real language model/);
+  assert.match(live.text, /not a full security audit/);
+  assert.match(live.detail, /ollama\/qwen3:4b/);
+  const down = targetNotice({ provider: "ollama/qwen3:4b", kind: "live", source: "target agent", ready: false, detail: "Ollama is not reachable" })!;
+  assert.equal(down.tone, "bad");
+  assert.match(down.text, /not ready/);
+  assert.match(down.detail, /Ollama is not reachable/);
+});
+
+test("a hosted live model says prompts go to a third party; a local one does not", () => {
+  const hosted = targetNotice({ provider: "groq/qwen/qwen3.8-27b", kind: "live", source: "target agent", ready: true, detail: null })!;
+  assert.match(hosted.detail, /hosted by Groq, a third party/);
+  const local = targetNotice({ provider: "ollama/qwen3:4b", kind: "live", source: "target agent", ready: true, detail: null })!;
+  assert.doesNotMatch(local.detail, /third party/);
+});

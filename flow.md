@@ -21,7 +21,7 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 | Pipeline | `backend/app/pipeline.py` | Session state machine. Each role stage runs in-process or through that role's agent |
 | Remote | `backend/app/remote.py` | Outbound HTTP to agents and the witness. Failures raise `RemoteError`, never fall back |
 | Role agents | `backend/agents/{red,blue,target}_agent.py`, `common.py` | Docker only. Each accepts a dispatch only with a valid control-plane grant, and Red/Blue sign every API request with their own key. The target holds no API credential |
-| Simulation | `attacks.py`, `target.py`, `providers.py`, `defenses.py`, `evaluator.py` | Test cases, deterministic target behind a provider interface, guardrails, criteria |
+| Simulation | `attacks.py`, `target.py`, `providers.py`, `defenses.py`, `evaluator.py` | Test cases, the target behind a provider interface (deterministic simulator by default, optional live Ollama model, §2.9), guardrails, criteria |
 | Isolation | `backend/app/isolation.py` | Permission probes, data checks, and network and container checks reported by the agents |
 | Audit | `backend/app/audit.py` | Hash-chain append, verification, tamper simulation |
 | Checkpoint | `backend/app/checkpoint.py` → `backend/witness/app.py`, `backend/witness/recover.py` | Publishes the chain head with an extension proof after commits; verifies the chain against the witness log. Operator recovery appends `supersede` records |
@@ -76,7 +76,7 @@ Every container is non-root and read-only, with all capabilities dropped (Postgr
       - any `BAYORA_TOKEN_RED/BLUE/TARGET`
       - a missing or malformed `BAYORA_CP_SIGNING_KEY`
       - a witness without a strong token
-   2. If the target runs in-process, `providers.get_provider()`. Any provider but `simulator` refuses startup.
+   2. If the target runs in-process, `providers.get_provider()` validates the configuration (`simulator`, or `ollama` with a valid URL, think flag and numeric limits). Anything else refuses startup. No network call is made at startup.
    3. `db.init_db()` only if `BAYORA_RUN_MIGRATIONS != "0"`. Docker sets `0`, since `bayora_app` cannot create tables; dev keeps the default.
 3. **Database.** `db.database_url()` reads `DATABASE_URL`. A `postgres…` URL uses `psycopg` with `dict_row`; otherwise `sqlite3` opens `backend/bayora.db`.
 4. **Agents** (`uvicorn agents.<role>_agent:app`). They hold no state. Red and Blue read their signing key (`BAYORA_<ROLE>_SIGNING_KEY`) on each call; all three read `BAYORA_CP_PUBLIC_KEYS` to verify grants. The target loads `providers.get_provider()` at import.
@@ -84,7 +84,7 @@ Every container is non-root and read-only, with all capabilities dropped (Postgr
 6. **nginx.** The image's envsubst step renders `default.conf.template`, filtered to `BAYORA_*` variables, into a tmpfs `/etc/nginx/conf.d`. The operator token exists only in that rendered file and the container's environment. `edge-relay` starts `nginx -g "daemon off;"` directly, skipping the image's entrypoint scripts, with `relay.conf` as its whole configuration. It resolves `frontend` through Docker DNS (127.0.0.11).
 7. **Browser.** `index.html` → `main.tsx` → `<LabProvider><App/></LabProvider>`. `LabProvider` calls:
    - `GET /api/meta`: stages, criteria, rules, playbook, the control register computed by `main.controls()` for this deployment, permissions, storage, `deployment` (role modes, checkpoint), and `target` from `main.target_info()`:
-     - target in-process (dev): `providers.get_provider()` id and kind, `source: "in-process"`
+     - target in-process (dev): `providers.get_provider()` id and kind, `source: "in-process"`, plus `ready` and `detail` from `provider.status()` (Ollama: `GET /api/tags`, 1.5 s, checks the model is installed)
      - target agent (Docker): `GET {target}/healthz` with a 2 s timeout; its `provider` and `kind`, `source: "target agent"`
      - agent unreachable or malformed: `kind: "unknown"`, `source: "target agent unreachable"`
 
@@ -256,6 +256,59 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 - **Risk reports:** the report shown must match the selected id (`run.id === selectedId`). A failed run list or report load is shown as an error. A run without a report says so and links to resume it.
 - **Isolation lab:** "expected" (permission table) before probing and "observed" after. Each role shows the credential its probes used, and a role with no credential is expected to be refused everywhere.
 
+### 2.9 Live AI target (optional, `BAYORA_TARGET_PROVIDER=ollama`)
+1. **Who calls the model:**
+   - **Docker:** `pipeline._target_model` calls `dispatch("target", "/v1/respond", …, target_timeout())`. `BAYORA_TARGET_TIMEOUT` defaults to 20 s; set it above the Ollama timeout for live mode.
+   - **Dev:** the in-process provider is called directly.
+   - **Both:** input guardrails run first in `defenses.run_target`, and output filtering runs after the answer, unchanged.
+2. **Target agent:** `/v1/respond` checks the grant (`target:respond`, session, lifetime) before any model call, then `provider.respond(prompt)`.
+3. **`OllamaProvider.respond`:** `POST {BAYORA_OLLAMA_URL}/api/chat`. In Docker that URL is `http://ollama-proxy:11434`, which forwards to `host.docker.internal:11434`.
+   - **Request:** `stream: false`, `think` (default true), `options` = temperature 0, seed 7, `num_predict` 6144, `num_ctx` 8192, plus `messages` = the scenario `SYSTEM_PROMPT` (synthetic canary token and patient record, refusal sentence) and the user prompt.
+   - **Response handling:** only `message.content` is used, with any leading `<think>…</think>` block removed. `message.thinking` is ignored and never stored.
+4. **Errors raise `ProviderError`; never a simulator answer:**
+   - timeout, connection failure
+   - non-JSON body, HTTP status ≥ 400 (with Ollama's `error` text, plus a `BAYORA_OLLAMA_THINK=false` hint for models without thinking)
+   - missing `message.content`, a model name other than the one requested
+   - an empty answer (with a max-tokens hint)
+
+   The agent maps the error to 502 "Target provider failure: …". The control plane surfaces that as `RemoteError` → 502 "Role service failure"; in-process, `main.provider_handler` returns 502. The stage's transaction rolls back, so answers already received in that stage are discarded and a resume repeats them.
+5. **Recording:** `target.*_response` audit events record `provider` (`ollama/<model>`), `provider_kind` (`live`) and `target_runtime`. The report's `deployment.target_provider` and `target_kind` come from the latest target event. `_disclaimer` states for live runs that answers vary and the checks are heuristics. `/api/meta` reports `target` with `ready` and `detail`, and the control register's "Target model" entry is derived from the same answer.
+6. **Docker network (compose profile `live`):** `target` ↔ `ollama_net` (internal) ↔ `ollama-proxy` ↔ `ollama_egress` ↔ host.
+   - **The proxy (`frontend/ollama-proxy.conf`):** forwards `POST /api/chat` and `GET /api/tags` with `Host: localhost`; every other path or method → 403. 64 kB body limit; no credential.
+   - **Without the profile:** the proxy does not exist, the target's `ollama_net` is empty, and a configured `ollama` provider reports `ready: false`.
+   - **Long stages:** nginx (`proxy_read_timeout 1800s`) and the edge relay (`proxy_timeout 30m`) wait long enough for a slow stage.
+7. **Measured (M3, 16 GB, qwen3:4b, Q4_K_M, GPU):** 22 to 244 s per answer, using 349 to 3,763 tokens. A full run is about 20 to 25 minutes; a two-attack run took 71 s in Docker and 94 s in dev.
+
+### 2.10 Live AI via Groq (optional, `BAYORA_TARGET_PROVIDER=groq`)
+1. **Same call path as §2.9:** grant check first, guardrails in the control plane, `provider.respond(prompt)`.
+2. **`GroqProvider.respond`:** `POST {BAYORA_GROQ_URL}/openai/v1/chat/completions` with `User-Agent: bayora-target`.
+   - **Request:** model (default `qwen/qwen3.8-27b`), `stream: false`, temperature 0, seed 7, `max_completion_tokens` 2048, `reasoning_format: parsed` (reasoning never in the answer), and the scenario `SYSTEM_PROMPT` plus the user prompt.
+   - **Answer:** `choices[0].message.content`, with any leading `<think>` block removed.
+3. **The key:**
+   - **Dev** (`BAYORA_GROQ_AUTH=key`): `Authorization: Bearer $GROQ_API_KEY` from this process's environment, HTTPS only.
+   - **Docker** (`BAYORA_GROQ_AUTH=proxy`): the target has no key and must not have one (startup refuses otherwise). It calls `http://groq-proxy:8080`, and the proxy adds the key.
+   - **Never exposed:** the key never appears in errors (redacted), `/api/meta`, `/healthz`, reports or audit events.
+4. **Errors (`ProviderError`, no fallback):**
+   - 401: key rejected
+   - 429: rate limit, with `retry-after`
+   - any other status ≥ 400: with Groq's error message
+   - a reply without `choices[0].message.content`, or a model other than the one requested
+   - an empty answer (with a max-tokens hint)
+   - timeout, unreachable
+
+   Readiness is `GET /openai/v1/models` (1.5 s), which checks the model is offered to the account.
+5. **Recording:**
+   - audit events and reports record `provider` `groq/<model>`, kind `live`
+   - the report disclaimer and the control register add that prompts and the synthetic scenario were sent to Groq, a third party
+   - the UI notice says so (`explain.liveHost`)
+6. **Docker network (compose profile `groq`):** `target` ↔ `groq_net` (internal) ↔ `groq-proxy` ↔ `groq_egress` ↔ `api.groq.com:443`.
+   - **The proxy** (`frontend/groq-proxy.conf.template`, rendered by envsubst into a tmpfs with `NGINX_ENVSUBST_FILTER=^GROQ_API_KEY$`):
+     - forwards `POST /openai/v1/chat/completions` and `GET /openai/v1/models`, with `Host`, `Authorization` and `User-Agent: bayora-groq-proxy` replaced; everything else → 403
+     - TLS verified against the image's CA bundle (`proxy_ssl_verify`, SNI `api.groq.com`)
+   - **Startup guard:** `05-require-key.sh` refuses to start without a key.
+   - **Probes:** every agent probes `groq-proxy:8080`. Red and Blue reaching it is an ISO-06 violation; for the target it is optional.
+7. **Observed (2026-10-21):** Groq's edge rejects Python urllib's default `User-Agent` with 403 (Cloudflare error 1010), hence the fixed user agents. A two-attack Docker run through the proxy took 1.7 s.
+
 ## 3. Isolation checks (`isolation.run_checks`)
 1. Reads the session's attempts.
 2. **`probe_matrix(app, operator_auth, reports)`:** 5 roles × 8 resources = 40 requests against `SENTINEL` (a session id that never exists).
@@ -275,7 +328,7 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 5. **`role_runtime_checks()`:**
    - If any role is in-process: ISO-06 is `simulated` (the declared `NETWORK_MODEL`, naming the in-process roles) and ISO-07 is `planned` / `not-run`.
    - If all three agents are configured: for each role, `call_agent(role, "/v1/probe", {})`. The agent probes its fixed `PROBE_TARGETS` (compose service names plus TEST-NET-1 `192.0.2.1`) with a 1.5 s TCP connect, and reads `/proc/self/status` (uid, CapEff, NoNewPrivs), a write probe on `/`, and whether `/var/run/docker.sock` exists.
-   - `evaluate_probe` compares reachability with `NETWORK_POLICY` (each role → `control-plane` only; "refused" counts as reachable) → ISO-06 `network`. `evaluate_security` → ISO-07 `configured`. An agent that doesn't answer fails both checks: fail closed.
+   - `evaluate_probe` compares reachability with `NETWORK_POLICY` (each role → `control-plane` only; "refused" counts as reachable) → ISO-06 `network`. `ollama-proxy` is in every agent's probe list: Red and Blue reaching it is a violation; for the target it is an optional path (`OPTIONAL_PATHS`), present only in Live AI mode. `evaluate_security` → ISO-07 `configured`. An agent that doesn't answer fails both checks: fail closed.
 6. **`checkpoint_check()`** → ISO-08: `enforced` when a witness is configured (`checkpoint.verify`), else `planned`.
 7. Inserts 8 rows and appends `isolation.check` ×8. All probes run before any local write in this stage.
 
@@ -370,6 +423,14 @@ What it detects: edits, deletions, reordering and truncation anywhere up to the 
 
 Residual risks from the security review (R1–R5), as of the privilege reduction milestone (details in descision.md):
 - **R1, reduced:** the credential-holding frontend is now on internal networks only, with no egress and no route to `host.docker.internal` (tested). `edge-relay` still sits on `public` and can reach the host, but it holds no credential.
+- **Live AI path (new):**
+  - **The proxy has egress.** `ollama-proxy` can reach the host and, if compromised, anything the host network allows. It holds no secret and only the target can reach it.
+  - **What a compromised target could do:** call `/api/chat` with any locally installed model (load or DoS on the host's Ollama), but not pull, delete, create or copy models.
+  - **Tested:** the evaluator's live-model limits and the proxy rules (`tests_compose/`, live profile).
+- **Groq path (new):**
+  - **The proxy holds the key and has internet egress.** If compromised, it could leak the key or reach any internet host. Only the target can reach it.
+  - **What a compromised target could do:** spend the account through `/openai/v1/chat/completions` (any model the key allows), but not read the key or use other endpoints.
+  - **Data leaves the machine:** prompts and the synthetic scenario go to a third party.
 - **R2, mitigated:** the witness now refuses checkpoints without a valid extension proof, so a token holder can no longer plant a far-future head through the API. A record written directly to the volume, or a legacy one, is handled by `witness/recover.py`.
 - **R3, mitigated for Red and Blue:**
   - **What holds:** there are no bearer role tokens. A request needs the role's private key, a fresh control-plane grant for that session, and a one-time jti.
@@ -388,6 +449,21 @@ Residual risks from the security review (R1–R5), as of the privilege reduction
 - The local (non-Docker) witness was run once on temporary ports. It checks history but is not isolated from the API's OS user.
 
 ## 8. Verification log (2026-10-20)
+
+Optional Groq provider (2026-10-21):
+- **Unit tests:** `pytest` 167 passed plus 12 skipped (SQLite), 179 (PostgreSQL 14); `tests/test_providers.py` 61 (26 Groq, all mocked); `tests/test_agents.py` 10. `npm test` 21/21, `tsc` and `npm run build` clean.
+- **Compose:** `docker compose config -q` valid with no profile, `live` and `groq`. `compose-test.sh`: 61 passed + 6 skipped without a profile; 64 passed + 3 skipped with `COMPOSE_PROFILES=groq`.
+  - The groq run first failed one test: Groq's edge returned 403 to urllib's default user agent. Fixed with fixed user agents at the proxy and in the provider, then rerun.
+- **Real Groq (`qwen/qwen3.8-27b`), throwaway Docker project through `groq-proxy`:** two-attack run in 1.7 s, recorded live, ISO-06 pass, witness ok.
+  - The key was found in no API response, no container log, and not in the target's environment. The stack was removed afterwards.
+
+Optional Live AI target (2026-10-21):
+- **Unit tests:** `pytest` 141 passed plus 12 skipped (SQLite), 153 (PostgreSQL 14); `tests/test_providers.py` 35; `tests/test_agents.py` 10. `npm test` 20/20, `tsc` and `npm run build` clean.
+- **Compose:** `docker compose config -q` valid with and without `--profile live`. `compose-test.sh`: 61 passed + 3 skipped without the profile, 64 passed with `COMPOSE_PROFILES=live`.
+- **Real model (qwen3:4b, Ollama 0.35.1, M3):**
+  - dev mode: two-attack run in 94 s
+  - throwaway Docker project through `ollama-proxy`: 71 s, ISO-06 pass, target events `live`/`agent`, witness ok
+  - stack removed afterwards; the running `bayora` stack was not touched
 
 Simplification and release-readiness pass (2026-10-21):
 - **Unit tests:** `pytest` 106 passed plus 12 skipped (SQLite), 118 (PostgreSQL 14). `npm test` 17/17, including `src/api.test.ts`.

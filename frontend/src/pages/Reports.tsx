@@ -35,6 +35,14 @@ function ReportDocument({ run }: { run: RunDetail }) {
           <p className="mt-1.5 font-mono text-[11px] text-bone-500">
             Run started {dateTime(run.created_at)} · report made {dateTime(report.generated_at)}
           </p>
+          {report.deployment?.target_provider && (
+            <p className="mt-1 font-mono text-[11px] text-bone-500">
+              Target in this run:{" "}
+              <span className={report.deployment.target_kind === "live" ? "text-bone-200" : "text-amber-300"}>
+                {report.deployment.target_provider} ({report.deployment.target_kind === "live" ? "live model" : report.deployment.target_kind})
+              </span>
+            </p>
+          )}
         </div>
         <button type="button" className="btn no-print" onClick={() => window.print()}>
           Print

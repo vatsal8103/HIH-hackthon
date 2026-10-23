@@ -31,6 +31,12 @@ PROBE_TARGETS = [
     ("blue-agent", "blue-agent", 8000),
     ("target", "target", 8000),
     ("witness", "witness", 8000),
+    ("ollama-proxy", "ollama-proxy", 11434),  # Live AI only; must never be reachable from Red or Blue
+    (
+        "groq-proxy",
+        "groq-proxy",
+        8080,
+    ),  # Live AI (Groq) only; holds the key; never reachable from Red or Blue
     ("egress", "192.0.2.1", 80),  # TEST-NET-1 (RFC 5737): never a real host
 ]
 

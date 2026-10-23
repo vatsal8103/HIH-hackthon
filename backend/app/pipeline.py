@@ -9,6 +9,7 @@ agent acts only through its own role-scoped API with its own token.
 """
 
 import json
+import os
 import uuid
 
 from app import audit, checkpoint, credentials, defenses, evaluator, isolation, providers, remote
@@ -78,10 +79,21 @@ def evidence(credential: str | None) -> dict:
     return {"credential": credential} if credential else {}
 
 
-def dispatch(role: str, path: str, session_id: str, actions: list[str], payload: dict):
+def dispatch(role: str, path: str, session_id: str, actions: list[str], payload: dict, timeout: float = 20.0):
     """Call a role agent with a grant scoped to this role, this session and these actions."""
     grant = credentials.issue_grant(role, session_id, actions)
-    return remote.call_agent(role, path, {**payload, "session_id": session_id, "grant": grant})
+    return remote.call_agent(
+        role, path, {**payload, "session_id": session_id, "grant": grant}, timeout=timeout
+    )
+
+
+def target_timeout() -> float:
+    """How long the control plane waits for one target answer. A live model needs more than the default."""
+    raw = os.environ.get("BAYORA_TARGET_TIMEOUT", "20")
+    try:
+        return max(1.0, min(float(raw), 900.0))
+    except ValueError as exc:
+        raise RuntimeError(f"BAYORA_TARGET_TIMEOUT={raw!r} is not a number") from exc
 
 
 def submit_attempt(db: DB, session_id: str, attack_id: str, phase: str, credential: str | None = None) -> str:
@@ -260,7 +272,9 @@ def _target_model(session_id: str):
     info = {"provider": None, "kind": None}
 
     def model(text: str) -> str:
-        reply = dispatch("target", "/v1/respond", session_id, ["target:respond"], {"prompt": text})
+        reply = dispatch(
+            "target", "/v1/respond", session_id, ["target:respond"], {"prompt": text}, target_timeout()
+        )
         if not isinstance(reply, dict) or not isinstance(reply.get("response"), str):
             raise remote.RemoteError("target agent returned a malformed response")
         info.update(provider=str(reply.get("provider")), kind=str(reply.get("kind")))
@@ -455,7 +469,7 @@ def stage_report(db: DB, session: dict) -> None:
             "target_provider": info["provider"],
             "target_kind": info["kind"],
         },
-        "disclaimer": _disclaimer(agents, info["kind"]),
+        "disclaimer": _disclaimer(agents, info["kind"], info["provider"]),
     }
     db.execute("UPDATE sessions SET report = ? WHERE id = ?", (json.dumps(report), session["id"]))
     audit.append(
@@ -481,12 +495,19 @@ def _last_provider(db: DB, session_id: str) -> dict:
     return {"provider": details.get("provider"), "kind": details.get("provider_kind")}
 
 
-def _disclaimer(agents: dict, kind: str | None) -> str:
-    target = (
-        "Results come from a deterministic simulated target, not a real LLM."
-        if kind == "simulated"
-        else f"Target provider kind: {kind}."
-    )
+def _disclaimer(agents: dict, kind: str | None, provider: str | None = None) -> str:
+    if kind == "simulated":
+        target = "Results come from a deterministic simulated target, not a real LLM."
+    elif kind == "live":
+        target = (
+            f"Results come from a live language model ({provider}). Its answers can vary between runs, and the "
+            "evaluator applies string-match checks written for this scripted scenario, so they can miss paraphrased "
+            "or partial leaks and differently worded refusals. A pass is not proof of safety."
+        )
+        if (provider or "").startswith("groq/"):
+            target += " The prompts and the synthetic scenario were sent to Groq, a third-party service."
+    else:
+        target = f"Target provider kind: {kind}."
     if all(agents.values()):
         scope = (
             "Red, Blue and Target ran as separate agent containers on separate Docker networks; network checks "

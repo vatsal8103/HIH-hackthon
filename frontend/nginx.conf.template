@@ -26,6 +26,9 @@ server {
         proxy_set_header Host $host;
         # The operator credential lives only here. Any client-supplied header is replaced.
         proxy_set_header Authorization "Bearer ${BAYORA_TOKEN_OPERATOR}";
+        # One "advance" request runs a whole stage. With a live reasoning model a stage can take
+        # many minutes (qwen3:4b: about 11 minutes for seven prompts on an M3).
+        proxy_read_timeout 1800s;
     }
 
     location / {

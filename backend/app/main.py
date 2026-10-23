@@ -40,17 +40,25 @@ def target_info() -> dict:
     url = remote.agent_url("target")
     if url is None:
         provider = providers.get_provider()
-        return {"provider": provider.id, "kind": provider.kind, "source": "in-process"}
+        return {"provider": provider.id, "kind": provider.kind, "source": "in-process", **provider.status()}
     try:
-        health = remote.call(url, "GET", "/healthz", timeout=2.0)
+        health = remote.call(url, "GET", "/healthz", timeout=4.0)
     except remote.RemoteError:
-        return {"provider": None, "kind": "unknown", "source": "target agent unreachable"}
-    kind = health.get("kind") if isinstance(health, dict) else None
-    provider = health.get("provider") if isinstance(health, dict) else None
+        return {
+            "provider": None,
+            "kind": "unknown",
+            "source": "target agent unreachable",
+            "ready": False,
+            "detail": None,
+        }
+    health = health if isinstance(health, dict) else {}
+    kind, provider, ready, detail = (health.get(k) for k in ("kind", "provider", "ready", "detail"))
     return {
         "provider": provider if isinstance(provider, str) else None,
         "kind": kind if isinstance(kind, str) else "unknown",
         "source": "target agent",
+        "ready": ready if isinstance(ready, bool) else None,
+        "detail": detail if isinstance(detail, str) else None,
     }
 
 
@@ -63,7 +71,14 @@ def _target_control(target: dict) -> dict:
     if target["kind"] == "unknown":
         detail = f"Unknown: {target['source']}, so what answers as the target cannot be stated."
         return {**entry, "status": "unknown", "detail": detail}
-    detail = f"{target['provider'] or target['kind']}, as reported by the {target['source']}."
+    detail = (
+        f"{target['provider'] or target['kind']}, a real language model, as reported by the {target['source']}. "
+        "Answers can vary between runs; the scripted checks are string-match heuristics, not a full audit."
+    )
+    if (target.get("provider") or "").startswith("groq/"):
+        detail += " Hosted by Groq, a third party: prompts and the synthetic scenario are sent there."
+    if target.get("ready") is False:
+        detail += f" Not ready: {target.get('detail') or 'the model did not answer'}"
     return {**entry, "status": "implemented", "detail": detail}
 
 
@@ -168,7 +183,8 @@ def controls(target: dict | None = None) -> list[dict]:
 async def lifespan(_app: FastAPI):
     validate_tokens()
     if not remote.agent_url("target"):
-        providers.get_provider()  # refuse to start with an unknown provider
+        providers.get_provider()  # refuse to start with an unknown or misconfigured provider
+    pipeline.target_timeout()  # refuse to start with a malformed BAYORA_TARGET_TIMEOUT
     if os.environ.get("BAYORA_RUN_MIGRATIONS", "1") != "0":
         db.init_db()  # in Docker the migrate service owns the schema; the runtime role cannot create tables
     yield
@@ -190,6 +206,12 @@ app.add_middleware(
 @app.exception_handler(pipeline.Conflict)
 def conflict_handler(_request: Request, exc: pipeline.Conflict):
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(providers.ProviderError)
+def provider_handler(_request: Request, exc: providers.ProviderError):
+    # In-process target only (the agent maps the same error to its own 502). The stage rolled back.
+    return JSONResponse(status_code=502, content={"detail": f"Target provider failure: {exc}"})
 
 
 @app.exception_handler(remote.RemoteError)

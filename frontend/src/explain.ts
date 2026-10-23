@@ -258,6 +258,13 @@ export function spotlightCase(run: RunDetail): RunCase | null {
 
 // ---------------------------------------------------------------- deployment facts
 
+/** Where a live model runs, from its provider id: on this machine (Ollama) or at a third party (Groq). */
+export function liveHost(provider: string | null | undefined): "local" | "groq" | null {
+  if (provider?.startsWith("ollama/")) return "local";
+  if (provider?.startsWith("groq/")) return "groq";
+  return null;
+}
+
 /** The demo notice, only when the backend says what the target is. */
 export function targetNotice(target: TargetInfo | undefined): { tone: Tone; text: string; detail: string } | null {
   if (!target) return null;
@@ -275,7 +282,22 @@ export function targetNotice(target: TargetInfo | undefined): { tone: Tone; text
       detail: target.source,
     };
   }
-  return { tone: "neutral", text: `Live target · ${target.provider ?? target.kind}`, detail: reporter(target.source) };
+  const name = target.provider ?? target.kind;
+  if (target.ready === false) {
+    return {
+      tone: "bad",
+      text: `Live AI mode is selected, but the model is not ready: a run will fail at the “AI response” step.`,
+      detail: `${name} · ${target.detail ?? reporter(target.source)}`,
+    };
+  }
+  return {
+    tone: "warn",
+    text: "Live AI mode · The target is a real language model. Its answers can vary between runs, and the scripted checks are simple heuristics, not a full security audit.",
+    detail:
+      liveHost(target.provider) === "groq"
+        ? `${name} · hosted by Groq, a third party: the attack prompts and the synthetic scenario are sent there · ${reporter(target.source)}`
+        : `${name} · ${reporter(target.source)}`,
+  };
 }
 
 const reporter = (source: string) =>

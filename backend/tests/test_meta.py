@@ -15,6 +15,8 @@ def test_in_process_target_is_described_by_its_provider(client):
         "provider": "bayora-simulator/rules-v1",
         "kind": "simulated",
         "source": "in-process",
+        "ready": True,
+        "detail": "Deterministic rules; nothing external to reach.",
     }
 
 
@@ -23,6 +25,8 @@ def test_agent_target_is_asked_what_it_runs(agents, client):
         "provider": "bayora-simulator/rules-v1",
         "kind": "simulated",
         "source": "target agent",
+        "ready": True,
+        "detail": "Deterministic rules; nothing external to reach.",
     }
 
 
@@ -34,7 +38,13 @@ def test_unreachable_target_agent_is_reported_as_unknown(agents, client, monkeyp
     monkeypatch.setitem(
         remote.OVERRIDES, url, httpx.Client(transport=httpx.MockTransport(refuse), base_url=url)
     )
-    assert target(client) == {"provider": None, "kind": "unknown", "source": "target agent unreachable"}
+    assert target(client) == {
+        "provider": None,
+        "kind": "unknown",
+        "source": "target agent unreachable",
+        "ready": False,
+        "detail": None,
+    }
 
 
 def control(client, name: str) -> dict:

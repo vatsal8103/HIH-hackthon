@@ -2,6 +2,15 @@
 FROM nginxinc/nginx-unprivileged:1.29-alpine AS relay
 COPY relay.conf /etc/nginx/nginx.conf
 
+# Live AI only (compose profile "live"): the target's restricted path to Ollama. See ollama-proxy.conf.
+FROM nginxinc/nginx-unprivileged:1.29-alpine AS ollama-proxy
+COPY ollama-proxy.conf /etc/nginx/nginx.conf
+
+# Live AI via Groq only (compose profile "groq"): holds the key, forwards two endpoints to api.groq.com.
+FROM nginxinc/nginx-unprivileged:1.29-alpine AS groq-proxy
+COPY groq-proxy.conf.template /etc/nginx/templates/default.conf.template
+COPY --chmod=755 groq-proxy-require-key.sh /docker-entrypoint.d/05-require-key.sh
+
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./

@@ -199,7 +199,11 @@ function RunDetailView({ id }: { id: string }) {
         <a href={href("runs")} className="label hover:text-bone-200">← All runs</a>
         <div className="mt-6 grid gap-10 lg:grid-cols-12 lg:items-end">
           <div className="min-w-0 lg:col-span-5">
-            <p className="label">Test run · started {dateTime(run.created_at)}</p>
+            <p className="label">
+              Test run · started {dateTime(run.created_at)}
+              {run.report?.deployment?.target_provider &&
+                ` · target ${run.report.deployment.target_provider}${run.report.deployment.target_kind === "live" ? " (live model)" : ""}`}
+            </p>
             <h1 className="mt-3 font-mono text-[34px] tracking-tight text-bone-50 sm:text-[44px]">{shortId(run.id)}</h1>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
               <p className="flex items-baseline gap-3">
