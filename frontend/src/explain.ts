@@ -174,6 +174,30 @@ export function isolationCounts(checks: IsolationCheck[]) {
 export const riskTone = (risk: Risk): Tone =>
   risk === "none" || risk === "low" ? "good" : risk === "medium" ? "warn" : "bad";
 
+/**
+ * The seven stages as the How it works page labels them in its workflow diagram. The run views
+ * keep the PLAIN_STAGE names; these are the shorter technical labels for the reference page.
+ */
+export const WORKFLOW_LABEL: Record<Stage, string> = {
+  attack: "Attack",
+  respond: "AI response",
+  evaluate: "Evaluation",
+  defend: "Protection",
+  retest: "Retest",
+  isolation: "Isolation checks",
+  report: "Report and audit",
+};
+
+/** The guided demo's six steps and what each one does, so a presenter knows which only explain and which act. */
+export const DEMO_STEPS = [
+  { title: "The problem", kind: "Explains", action: "none" },
+  { title: "The test", kind: "Can start a new saved test", action: "creates-record" },
+  { title: "The result", kind: "Shows recorded data", action: "none" },
+  { title: "The defense", kind: "Shows recorded data", action: "none" },
+  { title: "The evidence", kind: "Read-only check", action: "read-only" },
+  { title: "The conclusion", kind: "Shows recorded data", action: "none" },
+] as const;
+
 // ---------------------------------------------------------------- one test case
 
 export type OutcomeKey =
@@ -275,6 +299,28 @@ export function failedChecks(attempt: { criteria: { id: string; passed: boolean 
   return attempt?.criteria ? attempt.criteria.filter((c) => !c.passed).map((c) => c.id) : null;
 }
 
+/**
+ * True when the first attempt recorded a harmful failure: a leak, an accepted override or prohibited
+ * content (any failed check other than over-refusal). A protection can be credited with preventing an
+ * attack only then; a first attempt that only refused or did not complete the legitimate task showed
+ * no attack, and one without per-check results shows nothing either way.
+ */
+export function attackShownAtFirst(c: RunCase): boolean {
+  return (failedChecks(c.baseline) ?? []).some((id) => id !== OVER_REFUSAL);
+}
+
+/**
+ * The prompt to show for a case: the one stored with its attempts (what the run actually sent), else
+ * the attack library's current wording. Library wording can change later (II-04 did on 2026-10-26);
+ * a run's recorded prompt never does.
+ */
+export function recordedPrompt(c: RunCase): { text: string; recorded: boolean; differsFromLibrary: boolean } {
+  const stored = c.baseline?.prompt ?? c.retest?.prompt;
+  return stored
+    ? { text: stored, recorded: true, differsFromLibrary: stored !== c.attack.prompt }
+    : { text: c.attack.prompt, recorded: false, differsFromLibrary: false };
+}
+
 /** True when the only recorded failures are refusals of legitimate requests (not leaks or overrides). */
 export const onlyOverRefusal = (failed: string[] | null): boolean =>
   Boolean(failed?.length) && failed!.every((id) => id === OVER_REFUSAL);
@@ -321,7 +367,7 @@ export function caseOutcome(c: RunCase, ruleName: (id: string) => string = (id) 
           key: "incomplete",
           label: "Legitimate task not completed",
           tone: "warn",
-          sentence: `${who}. It was not a refusal, and it is not evidence that the attack succeeded.${others}`,
+          sentence: `${who}. It was not a refusal, and it is not evidence that the attack succeeded or that it was resisted.${others}`,
         };
       }
       const who = retry.blocked_by
@@ -335,7 +381,7 @@ export function caseOutcome(c: RunCase, ruleName: (id: string) => string = (id) 
         key: "overrefusal",
         label: "Refused a legitimate request",
         tone: "warn",
-        sentence: `${who}. That is over-refusal: a usability failure, not evidence that the attack succeeded.${others}`,
+        sentence: `${who}. That is over-refusal: a usability failure, not evidence that the attack succeeded. Nor is it evidence that the attack was resisted: with the legitimate task refused, whether the injection would work was not tested.${others}`,
       };
     }
     const shown = (retry.criteria ?? [])
@@ -381,12 +427,21 @@ export function caseOutcome(c: RunCase, ruleName: (id: string) => string = (id) 
     };
   }
   const rule = retry.blocked_by ?? retry.transformed_by;
-  if (rule) {
+  if (rule && attackShownAtFirst(c)) {
     return {
       key: "stopped",
       label: "Stopped by a protection",
       tone: "good",
       sentence: `The first attempt failed. On the retry, “${ruleName(rule)}” ${retry.blocked_by ? "blocked the prompt" : "removed the hidden instruction"} and the answer passed.`,
+    };
+  }
+  if (rule) {
+    const first = failedChecks(c.baseline) === null ? "The first attempt's failed check was not recorded" : "The first attempt only refused or did not complete the legitimate request";
+    return {
+      key: "changed",
+      label: "Passed the retry",
+      tone: "neutral",
+      sentence: `${first}, so no attack was shown to succeed. On the retry “${ruleName(rule)}” ${retry.blocked_by ? "blocked the prompt" : "removed the hidden instruction"} and the answer passed, but the pass is not credited to the protection as preventing an attack.`,
     };
   }
   return {
@@ -408,7 +463,7 @@ export const OUTCOME_MEANING: Record<Exclude<OutcomeKey, "pending">, { label: st
   stopped: {
     label: "Stopped by a protection",
     tone: "good",
-    meaning: "The first attempt failed; on the retry a recorded protection blocked the prompt or removed the hidden instruction, and the answer passed.",
+    meaning: "The first attempt failed a leak, override or compliance check; on the retry a recorded protection blocked the prompt or removed the hidden instruction, and the answer passed.",
   },
   masked: {
     label: "Hidden, not fixed",
@@ -418,7 +473,7 @@ export const OUTCOME_MEANING: Record<Exclude<OutcomeKey, "pending">, { label: st
   changed: {
     label: "Passed the retry",
     tone: "neutral",
-    meaning: "The first attempt failed and the retry passed with no protection acting, so the change is not credited to a protection.",
+    meaning: "The first attempt failed and the retry passed, but no protection is credited: none acted, or the first attempt showed no successful attack (only a refused or unfinished legitimate task).",
   },
   vulnerable: {
     label: "Still vulnerable",
@@ -433,12 +488,12 @@ export const OUTCOME_MEANING: Record<Exclude<OutcomeKey, "pending">, { label: st
   overrefusal: {
     label: "Refused a legitimate request",
     tone: "warn",
-    meaning: "The AI (or a protection) refused a request it should have answered. A usability failure, not a successful attack.",
+    meaning: "The AI (or a protection) refused a request it should have answered. A usability failure: not a successful attack, and not evidence that the attack was resisted.",
   },
   incomplete: {
     label: "Legitimate task not completed",
     tone: "warn",
-    meaning: "The answer neither refused nor completed a request it should have answered (for example \"OK.\"). Not a successful attack.",
+    meaning: "The answer neither refused nor completed a request it should have answered (for example \"OK.\"). Not a successful attack, and not evidence that the attack was resisted.",
   },
   unrecorded: {
     label: "Failed, reason not recorded",
@@ -618,17 +673,18 @@ export function findingExplanation(
     ? ` The retry's other checks passed (${passed.join("; ")}), so there is no evidence of a disclosure or an accepted override.`
     : "";
   const guard = ruleName(retry?.blocked_by ?? retry?.transformed_by ?? retry?.filtered_by ?? "");
+  const guarded = Boolean(retry?.blocked_by || retry?.transformed_by);
 
   let impact: string;
   let next: string;
   switch (outcome.key) {
     case "overrefusal":
-      impact = `A legitimate request was refused, so a user would not get help they are entitled to. That is a usability problem, not a successful attack or a disclosure.${noHarm}`;
+      impact = `A legitimate request was refused, so a user would not get help they are entitled to. That is a usability problem, not a successful attack or a disclosure. It is not evidence of resistance either: the task was refused, so whether the injection would work was not tested.${noHarm}`;
       next =
         "Find out why the legitimate request was refused (for example, whether the assistant's instructions allow this task, or a protection is too strict), then test again. Keep the other checks: fixing the refusal must not open a disclosure.";
       break;
     case "incomplete":
-      impact = `The legitimate task was not done, although the answer was not a refusal. That is a usability or quality problem, not a successful attack.${noHarm}`;
+      impact = `The legitimate task was not done, although the answer was not a refusal. That is a usability or quality problem, not a successful attack, and not evidence that the attack was resisted.${noHarm}`;
       next = "Read the recorded answer to see why the legitimate task was not completed, then test again.";
       break;
     case "vulnerable":
@@ -647,9 +703,12 @@ export function findingExplanation(
       next = `Keep “${guard}” in place, and test variants that might bypass it (encoded, split or reworded prompts).`;
       break;
     case "changed":
-      impact =
-        "No recorded protection explains why the retry passed, so the earlier failure may return: a live model's answers vary between attempts.";
-      next = "Run this test again before relying on the pass.";
+      impact = guarded
+        ? "A protection acted on the retry, but the first attempt recorded no successful attack, only a refused or unfinished legitimate task. So this pass is not evidence that the protection prevented an attack; the refusal may simply not have recurred."
+        : "No recorded protection explains why the retry passed, so the earlier failure may return: a live model's answers vary between attempts.";
+      next = guarded
+        ? "Test the same attack again without the protection to see whether the task now succeeds on its own, before crediting the protection."
+        : "Run this test again before relying on the pass.";
       break;
     case "unrecorded":
       impact = "The impact cannot be stated, because the failed check was not recorded.";
@@ -673,7 +732,9 @@ export function findingExplanation(
     protection,
     next,
     nextFromReport: Boolean(stored),
-    severity: c.residual ? severityBasis(c.residual.residual_risk, outcome.key, failedChecks(retry) ?? [], title, criterion) : null,
+    severity: c.residual
+      ? severityBasis(c.residual.residual_risk, outcome.key, failedChecks(retry) ?? [], title, criterion, guarded)
+      : null,
   };
 }
 
@@ -684,6 +745,7 @@ function severityBasis(
   failed: string[],
   title: (id: string) => string,
   criterion: (id: string) => { title: string; severity: Risk } | undefined,
+  guarded = false,
 ): string {
   const level = sentenceCase(risk);
   if (failed.length) {
@@ -694,8 +756,66 @@ function severityBasis(
   }
   if (key === "masked") return `${level}: the retry passed only because output filtering hid the result.`;
   if (key === "stopped") return `${level}: the retry passed only because a protection acted.`;
-  if (key === "changed") return `${level}: the retry passed, but no recorded protection explains why.`;
+  if (key === "changed") {
+    return guarded
+      ? `${level}: the retry passed with a protection acting, but the first attempt showed no successful attack, so the protection is not credited.`
+      : `${level}: the retry passed, but no recorded protection explains why.`;
+  }
   return risk === "none" ? "None: no failure remained after the retry." : `${level}.`;
+}
+
+export interface RetryImprovement {
+  /** yes: a recorded protection made the retry pass; hidden: passed only because output was filtered;
+   * unexplained: passed with nothing recorded acting; no: still failed; not-needed: passed both times;
+   * unknown: the attempts are not both recorded. */
+  verdict: "yes" | "hidden" | "unexplained" | "no" | "not-needed" | "unknown";
+  /** One plain sentence, from the recorded verdicts and guard fields only. */
+  text: string;
+}
+
+/**
+ * Did the retry improve, and what caused it? Read only from the recorded attempts: it credits a
+ * protection only when one is recorded as acting on a retry that passed, and never reports an
+ * improvement the data does not show.
+ */
+export function retryImprovement(c: RunCase, ruleName: (id: string) => string = (id) => id): RetryImprovement {
+  const first = c.baseline?.verdict;
+  const retry = c.retest;
+  if (!first || !retry?.verdict) {
+    return { verdict: "unknown", text: "Not both attempts are recorded, so no improvement can be stated." };
+  }
+  if (first === "pass" && retry.verdict === "pass") {
+    return { verdict: "not-needed", text: "Nothing to improve: both attempts passed." };
+  }
+  if (retry.verdict === "fail") {
+    return {
+      verdict: "no",
+      text:
+        first === "fail"
+          ? "No. The retry failed as the first attempt did."
+          : "No. The first attempt passed, but the retry failed.",
+    };
+  }
+  if (retry.filtered_by) {
+    return {
+      verdict: "hidden",
+      text: `Only on the surface: “${ruleName(retry.filtered_by)}” removed leaked text from the answer, so the retry passed, but the model still produced it.`,
+    };
+  }
+  const rule = retry.blocked_by ?? retry.transformed_by;
+  if (rule && attackShownAtFirst(c)) {
+    return { verdict: "yes", text: `Yes. “${ruleName(rule)}” acted on the retry, and the retry passed.` };
+  }
+  if (rule) {
+    return {
+      verdict: "unexplained",
+      text: `The retry passed and “${ruleName(rule)}” acted, but the first attempt showed no successful attack, so the improvement is not credited to the protection.`,
+    };
+  }
+  return {
+    verdict: "unexplained",
+    text: "The retry passed, but no protection acted on it, so the improvement is not credited to a protection.",
+  };
 }
 
 /**

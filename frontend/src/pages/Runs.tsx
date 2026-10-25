@@ -4,7 +4,7 @@ import { STAGES, api, type Attempt, type RunCase, type RunDetail } from "../api"
 import { Help, KindLegend, OutcomeTag, ResponseText, Technical, guardLine, useRuleName } from "../components/Explain";
 import { Empty, KindTag, Note, PageHead, RiskTag, STAGE_ORDER, SectionHead, VerdictTag, dateTime, shortId, stagger } from "../components/ui";
 import { OutcomeBar, OutcomeStrip } from "../components/Outcomes";
-import { PLAIN_STAGE, TONE_TEXT, caseOutcome, isolationCounts, runTargetLabel, stageResult } from "../explain";
+import { PLAIN_STAGE, TONE_TEXT, caseOutcome, isolationCounts, recordedPrompt, runTargetLabel, stageResult } from "../explain";
 import { href, navigate, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -52,6 +52,7 @@ function AttemptBlock({ title, attempt }: { title: string; attempt: Attempt | nu
 
 function CaseRow({ item, protections, open, onToggle, index }: { item: RunCase; protections: number; open: boolean; onToggle: () => void; index: number }) {
   const outcome = caseOutcome(item, useRuleName(), protections);
+  const prompt = recordedPrompt(item);
   return (
     <li className="hairline reveal border-b" style={stagger(index)}>
       <button
@@ -81,10 +82,15 @@ function CaseRow({ item, protections, open, onToggle, index }: { item: RunCase; 
             <p className="mt-2 text-[13.5px] text-bone-400">{item.attack.objective}</p>
           </div>
           <div className="md:col-span-2">
-            <p className="label">Prompt · submitted through the Red Team interface</p>
+            <p className="label">
+              {prompt.recorded ? "Prompt · as recorded for this run" : "Prompt · current library wording, not yet sent in this run"}
+            </p>
             <pre className="mt-2 border-l border-rust-500/60 pl-4 font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-bone-200">
-              {item.attack.prompt}
+              {prompt.text}
             </pre>
+            {prompt.differsFromLibrary && (
+              <p className="mt-2 text-[12px] text-bone-500">This run used an earlier wording of this attack; the attack library's current prompt differs.</p>
+            )}
           </div>
           <AttemptBlock title="First attempt · baseline" attempt={item.baseline} />
           <AttemptBlock

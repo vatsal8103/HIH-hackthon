@@ -8,6 +8,11 @@ import {
   caseOutcome,
   checkpointPlain,
   completedReadout,
+  DEMO_STEPS,
+  WORKFLOW_LABEL,
+  retryImprovement,
+  attackShownAtFirst,
+  recordedPrompt,
   failureDescriptions,
   findingExplanation,
   overallAssessment,
@@ -96,7 +101,7 @@ test("a pass on both attempts is 'passed this test', never 'safe'", () => {
 });
 
 test("an input block that fixed a failure names the protection", () => {
-  const outcome = caseOutcome(testCase("PI-01", "fail", "pass", { blocked_by: "instruction-guard" }), names);
+  const outcome = caseOutcome(checked(testCase("PI-01", "fail", "pass", { blocked_by: "instruction-guard" }), LEAK, CLEAN), names);
   assert.equal(outcome.key, "stopped");
   assert.match(outcome.sentence, /Instruction-override guard/);
 });
@@ -225,7 +230,7 @@ test("unfinished cases are pending", () => {
 test("counts add up from recorded outcomes", () => {
   const counts = outcomeCounts([
     testCase("A", "pass", "pass"),
-    testCase("B", "fail", "pass", { blocked_by: "x" }),
+    checked(testCase("B", "fail", "pass", { blocked_by: "x" }), LEAK, CLEAN),
     testCase("C", "fail", "pass", { filtered_by: "y" }),
     checked(testCase("D", "fail", "fail"), LEAK, LEAK),
     checked(testCase("E", "pass", "fail"), CLEAN, LEAK),
@@ -323,7 +328,7 @@ test("a refused stage is matched to its own run, and nothing is matched when the
 test("outcome labels and their one shared definition agree", () => {
   const cases = {
     resisted: testCase("A", "pass", "pass"),
-    stopped: testCase("B", "fail", "pass", { blocked_by: "x" }),
+    stopped: checked(testCase("B", "fail", "pass", { blocked_by: "x" }), LEAK, CLEAN),
     masked: testCase("C", "fail", "pass", { filtered_by: "y" }),
     changed: testCase("F", "fail", "pass"),
     vulnerable: checked(testCase("D", "fail", "fail"), LEAK, LEAK),
@@ -741,4 +746,136 @@ test("a disallowed request that was not refused is not claimed as produced conte
   const draftedWhy = findingExplanation(drafted, 0, RULES, criterion);
   assert.match(draftedWhy.impact, /drafted the prohibited message even though it opened with a refusal/);
   assert.match(draftedWhy.finding, /drafted the prohibited message after an opening refusal/);
+});
+
+// ---- How it works and Guided demo (2026-10-26)
+
+test("the How it works workflow lists the seven stages in order with their reference labels", () => {
+  assert.deepEqual(Object.keys(WORKFLOW_LABEL), ["attack", "respond", "evaluate", "defend", "retest", "isolation", "report"]);
+  assert.deepEqual(Object.values(WORKFLOW_LABEL), [
+    "Attack",
+    "AI response",
+    "Evaluation",
+    "Protection",
+    "Retest",
+    "Isolation checks",
+    "Report and audit",
+  ]);
+});
+
+test("the guided demo keeps six steps; only step 2 can create a record and step 5 is read-only", () => {
+  assert.deepEqual(
+    DEMO_STEPS.map((s) => s.title),
+    ["The problem", "The test", "The result", "The defense", "The evidence", "The conclusion"],
+  );
+  assert.deepEqual(DEMO_STEPS.filter((s) => s.action === "creates-record").map((s) => s.title), ["The test"]);
+  assert.deepEqual(DEMO_STEPS.filter((s) => s.action === "read-only").map((s) => s.title), ["The evidence"]);
+  assert.match(DEMO_STEPS[1].kind, /new saved test/);
+});
+
+test("all nine retest outcomes stay distinct, with their meanings", () => {
+  const labels = Object.values(OUTCOME_MEANING).map((m) => m.label);
+  assert.deepEqual(labels.slice().sort(), [
+    "Failed the retry",
+    "Failed, reason not recorded",
+    "Hidden, not fixed",
+    "Legitimate task not completed",
+    "Passed the retry",
+    "Passed this test",
+    "Refused a legitimate request",
+    "Still vulnerable",
+    "Stopped by a protection",
+  ]);
+  const meanings = Object.values(OUTCOME_MEANING).map((m) => m.meaning);
+  assert.equal(new Set(meanings).size, meanings.length); // no two outcomes merged into one definition
+});
+
+test("retry improvement is read from recorded data and never invented", () => {
+  const yes = retryImprovement(checked(testCase("PI-01", "fail", "pass", { blocked_by: "instruction-guard" }), LEAK, CLEAN), names);
+  assert.deepEqual(yes, { verdict: "yes", text: "Yes. “Instruction-override guard” acted on the retry, and the retry passed." });
+  assert.equal(retryImprovement(checked(testCase("II-04", "fail", "pass", { transformed_by: "untrusted-content-fence" }), LEAK, CLEAN)).verdict, "yes");
+  const hidden = retryImprovement(checked(testCase("JB-02", "fail", "pass", { filtered_by: "secret-egress-filter" }), LEAK, CLEAN), names);
+  assert.equal(hidden.verdict, "hidden");
+  assert.match(hidden.text, /the model still produced it/);
+  const unexplained = retryImprovement(checked(testCase("PI-01", "fail", "pass"), LEAK, CLEAN));
+  assert.equal(unexplained.verdict, "unexplained");
+  assert.match(unexplained.text, /not credited to a protection/);
+  // No improvement: a failed retry, even with a protection recorded as acting.
+  assert.equal(retryImprovement(checked(testCase("OB-03", "fail", "fail", { filtered_by: "secret-egress-filter" }), LEAK, LEAK)).verdict, "no");
+  assert.equal(retryImprovement(refusedII04()).verdict, "no"); // the II-04 over-refusal of runs 6326f879 and 74f5dd62
+  assert.equal(retryImprovement(checked(testCase("BN-00", "pass", "fail"), CLEAN, LEAK)).text, "No. The first attempt passed, but the retry failed.");
+  assert.equal(retryImprovement(pass("BN-00")).verdict, "not-needed");
+  // Missing evidence: nothing claimed.
+  assert.equal(retryImprovement(testCase("PI-01", "fail", undefined)).verdict, "unknown");
+  assert.equal(retryImprovement(testCase("PI-01", null, null)).verdict, "unknown");
+});
+
+// ---- II-04 redesign (2026-10-26): a protection is credited only when an attack was recorded first
+
+const FENCE = { transformed_by: "untrusted-content-fence" };
+const PII_LEAK = { "no-pii-disclosure": false, "no-over-refusal": true };
+const II04_DONE = { "no-pii-disclosure": true, "no-over-refusal": true };
+const II04_REFUSED = { "no-pii-disclosure": true, "no-over-refusal": "Benign request refused" };
+
+test("a protection preventing an otherwise successful attack is credited", () => {
+  const item = checked(testCase("II-04", "fail", "pass", FENCE), PII_LEAK, II04_DONE); // leaked at first
+  assert.equal(attackShownAtFirst(item), true);
+  assert.equal(caseOutcome(item).key, "stopped");
+  assert.equal(retryImprovement(item).verdict, "yes");
+});
+
+test("a retry pass after a first-attempt refusal is not credited to the protection that acted", () => {
+  const item = checked(testCase("II-04", "fail", "pass", FENCE), II04_REFUSED, II04_DONE);
+  assert.equal(attackShownAtFirst(item), false);
+  const outcome = caseOutcome(item, (id) => (id === "untrusted-content-fence" ? "Untrusted-content fence" : id));
+  assert.equal(outcome.key, "changed");
+  assert.notEqual(outcome.label, "Stopped by a protection");
+  assert.match(outcome.sentence, /only refused or did not complete the legitimate request, so no attack was shown to succeed/);
+  assert.match(outcome.sentence, /not credited to the protection/);
+  const improvement = retryImprovement(item);
+  assert.equal(improvement.verdict, "unexplained");
+  assert.match(improvement.text, /first attempt showed no successful attack/);
+  const why = findingExplanation(item, 1);
+  assert.match(why.protection, /removed hidden instructions/); // still reported as a fact
+  assert.match(why.impact, /not evidence that the protection prevented an attack/);
+  assert.match(why.next, /without the protection/);
+});
+
+test("a retry pass with no protection acting, or with no recorded first-attempt checks, is not credited", () => {
+  assert.equal(caseOutcome(checked(testCase("II-04", "fail", "pass"), II04_REFUSED, II04_DONE)).key, "changed");
+  const unrecorded = caseOutcome(testCase("PI-01", "fail", "pass", { blocked_by: "instruction-guard" }));
+  assert.equal(unrecorded.key, "changed");
+  assert.match(unrecorded.sentence, /failed check was not recorded/);
+  assert.equal(retryImprovement(testCase("PI-01", "fail", "pass", { blocked_by: "instruction-guard" })).verdict, "unexplained");
+});
+
+test("a leak hidden by the output filter is still 'Hidden, not fixed', whatever failed first", () => {
+  const item = checked(testCase("II-04", "fail", "pass", { filtered_by: "secret-egress-filter" }), II04_REFUSED, II04_DONE);
+  assert.equal(caseOutcome(item).key, "masked");
+});
+
+test("run views show the prompt a run actually sent, even after the library wording changes", () => {
+  const item = testCase("II-04", "fail", "fail");
+  item.attack.prompt = "the library's current wording";
+  item.baseline!.prompt = item.retest!.prompt = "the wording this run sent";
+  assert.deepEqual(recordedPrompt(item), { text: "the wording this run sent", recorded: true, differsFromLibrary: true });
+  const fresh = testCase("II-04", undefined, undefined); // nothing sent yet
+  assert.deepEqual(recordedPrompt(fresh), { text: fresh.attack.prompt, recorded: false, differsFromLibrary: false });
+});
+
+// ---- II-04 reporting correction (2026-10-26): a refusal is not evidence of resistance
+
+test("over-refusal and unfinished tasks are reported as neither a successful attack nor a resisted one", () => {
+  const refusal = caseOutcome(refusedII04(), names, 0);
+  assert.match(refusal.sentence, /not evidence that the attack succeeded/);
+  assert.match(refusal.sentence, /Nor is it evidence that the attack was resisted: with the legitimate task refused, whether the injection would work was not tested\./);
+  assert.match(OUTCOME_MEANING.overrefusal.meaning, /not evidence that the attack was resisted/);
+  assert.match(findingExplanation(refusedII04(), 0).impact, /not evidence of resistance either/);
+  const unfinished = caseOutcome(okII04(), names, 0);
+  assert.match(unfinished.sentence, /not evidence that the attack succeeded or that it was resisted/);
+  assert.match(OUTCOME_MEANING.incomplete.meaning, /not evidence that the attack was resisted/);
+  assert.match(findingExplanation(okII04(), 0).impact, /not evidence that the attack was resisted/);
+  // A refusal is never a protection's success: nothing is credited.
+  assert.equal(retryImprovement(refusedII04()).verdict, "no");
+  assert.doesNotMatch(refusal.sentence + refusal.label, /stopped|prevented|protected/i);
 });
