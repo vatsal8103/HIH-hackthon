@@ -7,13 +7,19 @@ import { Pipeline } from "../components/Pipeline";
 import { Note, RiskTag, SectionHead, VerdictTag, dateTime, groupHash, shortId, stagger } from "../components/ui";
 import {
   OUTCOME_MEANING,
+  UNRESOLVED,
+  type OutcomeKey,
   PLAIN_STAGE,
-  RISK_PLAIN,
   TONE_TEXT,
   caseOutcome,
+  failureDescriptions,
+  findingExplanation,
   liveHost,
   outcomeCounts,
+  unresolvedNote,
   refusedStage,
+  remainingRiskNote,
+  retestNote,
   riskTone,
   spotlightCase,
 } from "../explain";
@@ -105,18 +111,23 @@ function Summary({ run }: { run: RunDetail }) {
     <div>
       <dl className="grid grid-cols-2 gap-px bg-ink-700 lg:grid-cols-4">
         <Stat label="Attacks tested" value={counts.total}>
-          {report.counts.baseline_failures} worked before any protection.
+          {report.counts.baseline_failures} failed a safety check on the first attempt.
         </Stat>
         <Stat label="Passed on retest" value={passed} tone="text-moss-300">
-          {counts.afterProtection
-            ? `${counts.afterProtection} only after a protection${counts.masked ? `; ${counts.masked} hidden, not fixed` : ""}.`
-            : "All of them passed from the start."}
+          {retestNote(counts)}
         </Stat>
-        <Stat label="Still vulnerable" value={counts.failing} tone={counts.failing ? "text-rust-300" : "text-bone-50"}>
-          {counts.failing ? "Failed the retry with protections in place." : "None failed the retry."}
+        <Stat
+          label="Unresolved findings"
+          value={counts.unresolved}
+          // Red only when a leak, override or compliance check still fails (or why it failed is unknown).
+          tone={
+            counts.failing > counts.overRefusal + counts.incomplete ? "text-rust-300" : counts.unresolved ? "text-amber-300" : "text-bone-50"
+          }
+        >
+          {unresolvedNote(counts, run.defenses.length)}
         </Stat>
         <Stat label="Highest remaining risk" value={capitalize(report.overall_risk)} tone={TONE_TEXT[riskTone(report.overall_risk)]}>
-          {RISK_PLAIN[report.overall_risk]}
+          {remainingRiskNote(report.overall_risk, counts.unresolved)}
         </Stat>
       </dl>
       <p className="mt-3 text-[12.5px] leading-relaxed text-bone-500">
@@ -126,8 +137,6 @@ function Summary({ run }: { run: RunDetail }) {
     </div>
   );
 }
-
-const LEGEND = (["stopped", "masked", "vulnerable"] as const).map((key) => OUTCOME_MEANING[key]);
 
 const VERDICT_TEXT = { pass: "text-moss-300", fail: "text-rust-300" } as const;
 
@@ -148,8 +157,20 @@ function AttemptLine({ item }: { item: RunCase }) {
   );
 }
 
-function CaseButton({ item, selected, onSelect, detail = false }: { item: RunCase; selected: boolean; onSelect: () => void; detail?: boolean }) {
-  const outcome = caseOutcome(item, useRuleName());
+function CaseButton({
+  item,
+  protections,
+  selected,
+  onSelect,
+  detail = false,
+}: {
+  item: RunCase;
+  protections: number;
+  selected: boolean;
+  onSelect: () => void;
+  detail?: boolean;
+}) {
+  const outcome = caseOutcome(item, useRuleName(), protections);
   return (
     <button
       type="button"
@@ -182,11 +203,12 @@ function RuleResult({ label, attempt, id }: { label: string; attempt: Attempt | 
 }
 
 /** The selected finding in plain words, with the recorded evidence behind it one click away. */
-function Finding({ item }: { item: RunCase }) {
+function Finding({ item, protections }: { item: RunCase; protections: number }) {
   const ruleName = useRuleName();
   const { meta } = useLab();
-  const outcome = caseOutcome(item, ruleName);
-  const broken = item.baseline?.criteria?.filter((c) => !c.passed) ?? [];
+  const outcome = caseOutcome(item, ruleName, protections);
+  const broken = failureDescriptions(item.baseline);
+  const why = findingExplanation(item, protections, ruleName, (id) => meta?.criteria[id]);
   const risk = item.residual?.residual_risk;
   const acted = item.retest ? guardLine(item.retest, ruleName) : null;
   const rows: [string, ReactNode][] = [
@@ -194,14 +216,15 @@ function Finding({ item }: { item: RunCase }) {
     ["What the attack tried", item.attack.objective],
     [
       "What the AI did first",
-      broken.length
-        ? `It broke ${broken.length === 1 ? "a safety rule" : `${broken.length} safety rules`}: ${broken
-            .map((c) => meta?.criteria[c.id]?.title ?? c.id)
-            .join("; ")}.`
-        : "It did not break any of the safety rules for this test.",
+      broken === null
+        ? "Which checks the first attempt failed was not recorded."
+        : broken.length
+          ? `It failed ${broken.length === 1 ? "a safety check" : `${broken.length} safety checks`}: ${broken.join("; ")}.`
+          : "It passed every safety check for this test.",
     ],
-    ["Did the protection help?", outcome.sentence],
-    ["What to do next", item.residual?.recommendation ?? (risk ? RISK_PLAIN[risk] : "No report yet.")],
+    ["What happened on the retry", outcome.sentence],
+    ["Why it matters", why.impact],
+    [why.nextFromReport ? "What to do next (recorded in the report)" : "What to do next", why.next],
   ];
   return (
     <article className="hairline border p-5 sm:p-8" aria-labelledby="finding-title">
@@ -230,11 +253,15 @@ function Finding({ item }: { item: RunCase }) {
             </dd>
           </div>
           <div>
+            <dt className="text-bone-500">Protections added in this run</dt>
+            <dd>{protections === 0 ? "None" : protections}</dd>
+          </div>
+          <div>
             <dt className="text-bone-500">Protection that acted on the retry</dt>
             <dd>{acted ?? "None recorded"}</dd>
           </div>
           <div>
-            <dt className="text-bone-500">Recorded reason</dt>
+            <dt className="text-bone-500">Reason recorded in the report (verbatim)</dt>
             <dd>{item.residual?.rationale ?? "Not recorded"}</dd>
           </div>
         </dl>
@@ -290,7 +317,10 @@ function Evidence({ run }: { run: RunDetail }) {
 
 /** A finished run: the numbers, what needs attention (selectable), every attack (secondary), and the selected finding. */
 function CompletedRun({ run }: { run: RunDetail }) {
-  const attention = run.cases.filter((c) => ["vulnerable", "regressed", "masked"].includes(caseOutcome(c).key));
+  const protections = run.defenses.length;
+  // The same definition as the "Unresolved findings" card; meanings are shown only for outcomes present.
+  const attention = run.cases.filter((c) => UNRESOLVED.includes(caseOutcome(c).key));
+  const legend = [...new Set(attention.map((c) => caseOutcome(c).key))].map((key) => OUTCOME_MEANING[key as Exclude<OutcomeKey, "pending">]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = run.cases.find((c) => c.attack.id === selectedId) ?? spotlightCase(run);
   const panel = useRef<HTMLDivElement>(null);
@@ -314,18 +344,18 @@ function CompletedRun({ run }: { run: RunDetail }) {
               <span className="sr-only"> findings; select one to see it explained</span>
             </p>
             {attention.length === 0 ? (
-              <p className="mt-3 text-[13.5px] text-moss-300">Nothing in this run: no attack still works and none is only hidden.</p>
+              <p className="mt-3 text-[13.5px] text-moss-300">Nothing in this run: every attack passed the retry, and none only because its result was hidden.</p>
             ) : (
               <ul className="mt-2">
                 {attention.map((item) => (
                   <li key={item.attack.id}>
-                    <CaseButton item={item} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} />
+                    <CaseButton item={item} protections={protections} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} />
                   </li>
                 ))}
               </ul>
             )}
             <dl className="mt-4 space-y-1.5 text-[12.5px] leading-snug">
-              {LEGEND.map((entry) => (
+              {legend.map((entry) => (
                 <div key={entry.label}>
                   <dt className={`inline font-medium ${TONE_TEXT[entry.tone]}`}>{entry.label}:</dt>{" "}
                   <dd className="inline text-bone-500">{entry.meaning}</dd>
@@ -344,7 +374,7 @@ function CompletedRun({ run }: { run: RunDetail }) {
               <ul>
                 {run.cases.map((item) => (
                   <li key={item.attack.id}>
-                    <CaseButton item={item} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} detail />
+                    <CaseButton item={item} protections={protections} selected={selected?.attack.id === item.attack.id} onSelect={select(item)} detail />
                   </li>
                 ))}
               </ul>
@@ -363,7 +393,7 @@ function CompletedRun({ run }: { run: RunDetail }) {
           </div>
         </div>
         <div ref={panel} className="min-w-0 scroll-mt-20 lg:col-span-7" aria-live="polite">
-          {selected && <Finding item={selected} />}
+          {selected && <Finding item={selected} protections={protections} />}
         </div>
       </div>
     </div>
@@ -452,7 +482,7 @@ export function Overview() {
           <SecurityCore run={run} stage={stage} playing={Boolean(playing)} />
           <figcaption className="pointer-events-none absolute inset-x-4 top-4 flex items-start justify-between gap-4">
             <span className="label whitespace-nowrap">
-              Fig. 01<span className="hidden sm:inline"> · Tester, target and defender, kept apart</span>
+              Fig. 01<span className="hidden sm:inline lg:hidden xl:inline"> · Tester, target and defender, kept apart</span>
             </span>
             {stageIndex ? (
               <span className="label text-right text-moss-300">

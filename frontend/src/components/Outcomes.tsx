@@ -55,7 +55,7 @@ export function OutcomeStrip({ run }: { run: RunDetail }) {
   );
 }
 
-/** Proportional bar from run counts: passed at baseline, mitigated, still failing. */
+/** Proportional bar from run counts: passed at baseline, passed only on the retry, still failing. */
 export function OutcomeBar({ counts }: { counts: RunSummary["counts"] }) {
   if (!counts) return <span className="hatch block h-1.5 w-full max-w-40" aria-label="No report yet" />;
   const clean = counts.cases - counts.baseline_failures;
@@ -68,7 +68,7 @@ export function OutcomeBar({ counts }: { counts: RunSummary["counts"] }) {
     <span
       className="flex h-1.5 w-full max-w-40 gap-px"
       role="img"
-      aria-label={`${clean} passed at first, ${counts.mitigated} passed after a protection, ${counts.residual_failures} still failing`}
+      aria-label={`${clean} passed at first, ${counts.mitigated} passed only on the retry, ${counts.residual_failures} still failing`}
     >
       {segments.map(([value, color], i) => (value ? <span key={i} className={color} style={{ flexGrow: value }} /> : null))}
     </span>

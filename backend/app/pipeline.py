@@ -57,17 +57,40 @@ def create_session(db: DB, attack_ids: list[str]) -> str:
     return session_id
 
 
-def advance(db: DB, session_id: str, app, operator_auth: str | None = None) -> str:
-    """Run the next stage. `app` and the caller's `operator_auth` are used for isolation probes."""
+def advance(
+    db: DB, session_id: str, app, operator_auth: str | None = None, expected: str | None = None
+) -> str:
+    """Run the next stage. `app` and the caller's `operator_auth` are used for isolation probes.
+
+    `expected` is the stage the caller means to run; if another request already ran it, the
+    call is refused instead of running the stage after it (a double click runs one stage).
+    Concurrent calls for one session run the stage once: PostgreSQL holds the session row
+    for the whole stage (FOR NO KEY UPDATE, which still lets role agents insert rows that
+    reference the session), and the final compare-and-set refuses a stage whose session
+    moved on meanwhile (SQLite), rolling back everything the loser wrote.
+    """
+    if db.is_pg:
+        db.execute("SELECT id FROM sessions WHERE id = ? FOR NO KEY UPDATE", (session_id,))
     session = get_session(db, session_id)
+    current = session["stage"]
     stage = next_stage(session)
     if stage is None:
         raise Conflict("Session already completed")
+    if expected is not None and expected != stage:
+        raise Conflict(
+            f"Stage {expected!r} is not next for this session (next: {stage!r}); it may already have run"
+        )
     if stage == "isolation":
         isolation.run_checks(db, app, session_id, operator_auth)  # probes run before this stage writes
     else:
         STAGE_HANDLERS[stage](db, session)
-    db.execute("UPDATE sessions SET stage = ? WHERE id = ?", (stage, session_id))
+    moved = db.execute(
+        "UPDATE sessions SET stage = ? WHERE id = ? AND stage = ?", (stage, session_id, current)
+    ).rowcount
+    if moved != 1:
+        raise Conflict(
+            f"Another request advanced this session while {stage!r} ran; this attempt was rolled back"
+        )
     return stage
 
 
@@ -265,11 +288,22 @@ def stage_attack(db: DB, session: dict) -> None:
 
 
 def _target_model(session_id: str):
-    """The model the guardrails wrap: the isolated target agent if configured, else the local provider."""
+    """The model the guardrails wrap: the isolated target agent if configured, else the local provider.
+
+    `info` carries the provider identity and, per answer, `metadata`: the whitelisted provider
+    metadata of the latest call (finish reason, token counts). `_respond` resets it before each
+    prompt, so a prompt blocked before reaching the model never inherits another answer's metadata.
+    """
     if not remote.agent_url("target"):
         provider = providers.get_provider()
-        return provider.respond, {"provider": provider.id, "kind": provider.kind}
-    info = {"provider": None, "kind": None}
+        info = {"provider": provider.id, "kind": provider.kind, "metadata": {}}
+
+        def local(text: str) -> str:
+            answer, info["metadata"] = provider.respond_with_metadata(text)
+            return answer
+
+        return local, info
+    info = {"provider": None, "kind": None, "metadata": {}}
 
     def model(text: str) -> str:
         reply = dispatch(
@@ -277,7 +311,11 @@ def _target_model(session_id: str):
         )
         if not isinstance(reply, dict) or not isinstance(reply.get("response"), str):
             raise remote.RemoteError("target agent returned a malformed response")
-        info.update(provider=str(reply.get("provider")), kind=str(reply.get("kind")))
+        info.update(
+            provider=str(reply.get("provider")),
+            kind=str(reply.get("kind")),
+            metadata=providers.safe_metadata(reply.get("metadata")),  # re-checked: the agent is not trusted
+        )
         return reply["response"]
 
     return model, info
@@ -291,6 +329,7 @@ def _respond(db: DB, session_id: str, phase: str) -> None:
         (session_id, phase),
     )
     for row in pending:
+        info["metadata"] = {}
         result = defenses.run_target(row["prompt"], rules, model)
         db.execute(
             "UPDATE attempts SET response = ?, blocked_by = ?, filtered_by = ?, transformed_by = ? WHERE id = ?",
@@ -302,23 +341,21 @@ def _respond(db: DB, session_id: str, phase: str) -> None:
                 row["id"],
             ),
         )
-        audit.append(
-            db,
-            session_id,
-            "target",
-            f"target.{phase}_response",
-            f"attempt:{row['id']}",
-            {
-                "phase": phase,
-                "response_sha256": audit.sha256(result["response"]),
-                "blocked_by": result["blocked_by"],
-                "filtered_by": result["filtered_by"],
-                "transformed_by": result["transformed_by"],
-                "provider": info["provider"],
-                "provider_kind": info["kind"],
-                "target_runtime": "agent" if remote.agent_url("target") else "in-process",
-            },
-        )
+        details = {
+            "phase": phase,
+            "response_sha256": audit.sha256(result["response"]),
+            "blocked_by": result["blocked_by"],
+            "filtered_by": result["filtered_by"],
+            "transformed_by": result["transformed_by"],
+            "provider": info["provider"],
+            "provider_kind": info["kind"],
+            "target_runtime": "agent" if remote.agent_url("target") else "in-process",
+        }
+        if info[
+            "metadata"
+        ]:  # only when the provider reported any (never for the simulator or a blocked prompt)
+            details["provider_metadata"] = info["metadata"]
+        audit.append(db, session_id, "target", f"target.{phase}_response", f"attempt:{row['id']}", details)
 
 
 def _evaluate(db: DB, session_id: str, phase: str) -> None:
@@ -328,7 +365,8 @@ def _evaluate(db: DB, session_id: str, phase: str) -> None:
         (session_id, phase),
     )
     for row in rows:
-        verdict, results = evaluator.evaluate(row["response"], BY_ID[row["attack_id"]]["criteria"])
+        attack = BY_ID[row["attack_id"]]
+        verdict, results = evaluator.evaluate(row["response"], attack["criteria"], attack.get("task"))
         db.execute(
             "UPDATE attempts SET verdict = ?, criteria = ? WHERE id = ?",
             (verdict, json.dumps(results), row["id"]),
@@ -393,7 +431,8 @@ def residual_risk(attack: dict, baseline: dict, retest: dict) -> tuple[str, str]
     if retest["verdict"] == "fail":
         failed = [r["id"] for r in json.loads(retest["criteria"]) if not r["passed"]]
         level = max((evaluator.CRITERIA[c]["severity"] for c in failed), key=RISK_ORDER.index)
-        return level, f"Still failing after defense: {', '.join(failed)}."
+        # Neutral about defenses: the playbook may have added none (e.g. for over-refusal).
+        return level, f"Still failing on retest: {', '.join(failed)}."
     if baseline["verdict"] == "pass":
         return "none", "Passed at baseline and on retest."
     if retest["blocked_by"]:
@@ -433,7 +472,7 @@ def stage_report(db: DB, session: dict) -> None:
     chain = audit.verify(db)
     anchor = checkpoint.verify(audit.load(db))
     agents = {role: bool(remote.agent_url(role)) for role in remote.AGENT_ENV}
-    info = _last_provider(db, session["id"])  # what actually answered, as recorded in the chain
+    info = recorded_target(db, session["id"])  # what actually answered, as recorded in the chain
     report = {
         "generated_at": audit.now(),
         "overall_risk": max((c["residual_risk"] for c in cases), key=RISK_ORDER.index, default="none"),
@@ -485,8 +524,8 @@ def stage_report(db: DB, session: dict) -> None:
     )
 
 
-def _last_provider(db: DB, session_id: str) -> dict:
-    """Provider identity recorded on this session's latest target response event."""
+def recorded_target(db: DB, session_id: str) -> dict:
+    """Provider identity recorded on this session's latest target response event (None before any answer)."""
     row = db.one(
         "SELECT details FROM audit_events WHERE session_id = ? AND event_type LIKE ? ORDER BY seq DESC LIMIT 1",
         (session_id, "target.%"),  # a parameter: psycopg treats a literal % in SQL as a placeholder
@@ -501,8 +540,9 @@ def _disclaimer(agents: dict, kind: str | None, provider: str | None = None) -> 
     elif kind == "live":
         target = (
             f"Results come from a live language model ({provider}). Its answers can vary between runs, and the "
-            "evaluator applies string-match checks written for this scripted scenario, so they can miss paraphrased "
-            "or partial leaks and differently worded refusals. A pass is not proof of safety."
+            "evaluator applies pattern-matching heuristics written for this scripted scenario (known values in common "
+            "forms, common refusal openers), so they can still miss reworded or summarised leaks and unusual refusals. "
+            "A pass is not proof of safety."
         )
         if (provider or "").startswith("groq/"):
             target += " The prompts and the synthetic scenario were sent to Groq, a third-party service."

@@ -99,7 +99,12 @@ def api(method: str, path: str, role: str, act: str, session_id: str, grant: str
     token = _signed_request(role, act, session_id, json or {}, grant)
     response = _send(method, path, {"Authorization": f"Bayora-Signed {token}"}, json)
     if response.status_code >= 400:
-        raise HTTPException(502, f"control plane answered {response.status_code} for {method} {path}")
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        reason = f": {detail[:300]}" if isinstance(detail, str) and detail.strip() else ""
+        raise HTTPException(502, f"control plane answered {response.status_code} for {method} {path}{reason}")
     return response.json()
 
 

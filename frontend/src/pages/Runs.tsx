@@ -4,7 +4,7 @@ import { STAGES, api, type Attempt, type RunCase, type RunDetail } from "../api"
 import { Help, KindLegend, OutcomeTag, ResponseText, Technical, guardLine, useRuleName } from "../components/Explain";
 import { Empty, KindTag, Note, PageHead, RiskTag, STAGE_ORDER, SectionHead, VerdictTag, dateTime, shortId, stagger } from "../components/ui";
 import { OutcomeBar, OutcomeStrip } from "../components/Outcomes";
-import { PLAIN_STAGE, TONE_TEXT, caseOutcome, isolationCounts, stageResult } from "../explain";
+import { PLAIN_STAGE, TONE_TEXT, caseOutcome, isolationCounts, runTargetLabel, stageResult } from "../explain";
 import { href, navigate, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -50,8 +50,8 @@ function AttemptBlock({ title, attempt }: { title: string; attempt: Attempt | nu
   );
 }
 
-function CaseRow({ item, open, onToggle, index }: { item: RunCase; open: boolean; onToggle: () => void; index: number }) {
-  const outcome = caseOutcome(item, useRuleName());
+function CaseRow({ item, protections, open, onToggle, index }: { item: RunCase; protections: number; open: boolean; onToggle: () => void; index: number }) {
+  const outcome = caseOutcome(item, useRuleName(), protections);
   return (
     <li className="hairline reveal border-b" style={stagger(index)}>
       <button
@@ -87,7 +87,10 @@ function CaseRow({ item, open, onToggle, index }: { item: RunCase; open: boolean
             </pre>
           </div>
           <AttemptBlock title="First attempt · baseline" attempt={item.baseline} />
-          <AttemptBlock title="Retry with protections · retest" attempt={item.retest} />
+          <AttemptBlock
+            title={protections ? "Retry with protections · retest" : "Retry · no protection added · retest"}
+            attempt={item.retest}
+          />
           {item.residual && (
             <div className="md:col-span-2">
               <Note tone={item.residual.residual_risk === "high" || item.residual.residual_risk === "critical" ? "error" : item.residual.residual_risk === "medium" ? "warn" : "neutral"}>
@@ -200,9 +203,8 @@ function RunDetailView({ id }: { id: string }) {
         <div className="mt-6 grid gap-10 lg:grid-cols-12 lg:items-end">
           <div className="min-w-0 lg:col-span-5">
             <p className="label">
-              Test run · started {dateTime(run.created_at)}
-              {run.report?.deployment?.target_provider &&
-                ` · target ${run.report.deployment.target_provider}${run.report.deployment.target_kind === "live" ? " (live model)" : ""}`}
+              Test run · started {dateTime(run.created_at)} ·{" "}
+              <span className={TONE_TEXT[runTargetLabel(run.target).tone]}>target: {runTargetLabel(run.target).text}</span>
             </p>
             <h1 className="mt-3 font-mono text-[34px] tracking-tight text-bone-50 sm:text-[44px]">{shortId(run.id)}</h1>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -210,10 +212,10 @@ function RunDetailView({ id }: { id: string }) {
                 <span className="label">Remaining risk</span>
                 <RiskTag risk={run.report?.overall_risk} />
               </p>
-              {run.status === "running" && !lab.busy && (
+              {run.status === "incomplete" && !lab.busy && (
                 <button type="button" className="btn btn-primary" onClick={() => lab.resume(run.id)}>Resume run</button>
               )}
-              {run.status === "running" && lab.busy && lab.run?.id === run.id && <span className="label text-moss-300">Running now</span>}
+              {run.status === "incomplete" && lab.busy && lab.run?.id === run.id && <span className="label text-moss-300">Running now</span>}
               {run.report && <a href={href("reports", run.id)} className="btn">Open report</a>}
             </div>
           </div>
@@ -232,12 +234,13 @@ function RunDetailView({ id }: { id: string }) {
         <div className="min-w-0 space-y-14 lg:col-span-9">
           <section>
             <SectionHead index="01" title="Attacks in this run" aside={<span className="label hidden sm:inline">First try · Retry · Remaining risk</span>} />
-            <p className="mt-3 text-[13px] text-bone-500">Open an attack to see the prompt, what the AI answered each time, and which rules it broke.</p>
+            <p className="mt-3 text-[13px] text-bone-500">Open an attack to see the prompt, what the AI answered each time, and which checks it failed.</p>
             <ul>
               {run.cases.map((item, i) => (
                 <CaseRow
                   key={item.attack.id}
                   item={item}
+                  protections={run.defenses.length}
                   index={i}
                   open={open === item.attack.id}
                   onToggle={() => setOpen(open === item.attack.id ? null : item.attack.id)}
@@ -249,7 +252,11 @@ function RunDetailView({ id }: { id: string }) {
           <section>
             <SectionHead index="02" title="Protections added by the Blue Team" />
             {run.defenses.length === 0 ? (
-              <Empty>No protections added{run.report ? ": nothing in this run failed at first." : " yet."}</Empty>
+              <Empty>No protections added{run.report
+                ? run.report.counts.baseline_failures > 0
+                  ? ": baseline findings remain unresolved."
+                  : ": no baseline failures required remediation."
+                : " yet."}</Empty>
             ) : (
               <ul>
                 {run.defenses.map((rule) => (
@@ -311,7 +318,8 @@ function RunList() {
               <tr className="hairline border-b">
                 <th scope="col" className="py-3 pr-4 font-normal">Run</th>
                 <th scope="col" className="hidden py-3 pr-4 font-normal sm:table-cell">Started</th>
-                <th scope="col" className="hidden w-[38%] py-3 pr-4 font-normal md:table-cell">Result · passed at first / after protection / still failing</th>
+                <th scope="col" className="hidden py-3 pr-4 font-normal lg:table-cell">Target</th>
+                <th scope="col" className="hidden w-[32%] py-3 pr-4 font-normal md:table-cell">Result · passed at first / passed on retry / still failing</th>
                 <th scope="col" className="py-3 pr-4 font-normal">Progress</th>
                 <th scope="col" className="py-3 text-right font-normal">Remaining risk</th>
               </tr>
@@ -332,6 +340,9 @@ function RunList() {
                     <span className="mt-1 block text-[12px] text-bone-500 sm:hidden">{dateTime(run.created_at)}</span>
                   </th>
                   <td className="hidden py-4 pr-4 text-[13px] text-bone-400 sm:table-cell">{dateTime(run.created_at)}</td>
+                  <td className={`hidden max-w-[14rem] truncate py-4 pr-4 font-mono text-[11.5px] lg:table-cell ${TONE_TEXT[runTargetLabel(run.target).tone]}`}>
+                    {runTargetLabel(run.target).text}
+                  </td>
                   <td className="hidden py-4 pr-4 md:table-cell">
                     <div className="flex items-center gap-4">
                       <OutcomeBar counts={run.counts} />

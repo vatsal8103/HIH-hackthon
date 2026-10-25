@@ -96,12 +96,22 @@ export interface Report {
   disclaimer: string;
 }
 
+/** What answered as the target in a run, as recorded. Both null before the target has answered. */
+export interface RunTarget {
+  provider: string | null;
+  kind: "simulated" | "live" | (string & {}) | null;
+}
+
+/** "incomplete": the run stopped before its report; stages run only while a request drives them. */
+export type RunStatus = "incomplete" | "completed";
+
 export interface RunDetail {
   id: string;
   created_at: string;
   stage: Stage | "created";
   next_stage: Stage | null;
-  status: "running" | "completed";
+  status: RunStatus;
+  target?: RunTarget;
   cases: RunCase[];
   defenses: Defense[];
   isolation: IsolationCheck[];
@@ -112,7 +122,8 @@ export interface RunSummary {
   id: string;
   created_at: string;
   stage: Stage | "created";
-  status: "running" | "completed";
+  status: RunStatus;
+  target?: RunTarget;
   attack_ids: string[];
   overall_risk: Risk | null;
   counts: Report["counts"] | null;
@@ -239,7 +250,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
   } catch {
-    throw new ApiError(0, "Cannot reach the Bayora API. Is the backend running on port 8000?");
+    throw new ApiError(0, "Cannot reach the Bayora API. Check that the backend (or the Docker stack) is running.");
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -282,9 +293,10 @@ export const api = {
       isRun,
       "new run",
     ),
-  advance: (id: string) =>
+  // `stage` is the step the caller means to run: a repeated request is refused (409) instead of running the next one.
+  advance: (id: string, stage: Stage) =>
     checked<{ executed: Stage; run: RunDetail; checkpoint?: CheckpointPublish }>(
-      post(`/api/runs/${encodeURIComponent(id)}/advance`),
+      post(`/api/runs/${encodeURIComponent(id)}/advance`, { stage }),
       (value) => isRecord("executed", "run")(value) && isRun((value as { run: unknown }).run),
       "stage result",
     ),

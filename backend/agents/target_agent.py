@@ -44,10 +44,11 @@ def health():
 def respond(body: Prompt):
     common.check_grant(body.grant, "target", body.session_id, {"target:respond"})  # before any model call
     try:
-        answer = provider.respond(body.prompt)
+        answer, metadata = provider.respond_with_metadata(body.prompt)
     except ProviderError as exc:
         raise HTTPException(502, f"Target provider failure: {exc}") from exc
-    return {"response": answer, "provider": provider.id, "kind": provider.kind}
+    # metadata is whitelisted by the provider: finish reason and token counts, never reasoning.
+    return {"response": answer, "provider": provider.id, "kind": provider.kind, "metadata": metadata}
 
 
 @app.post("/v1/probe")

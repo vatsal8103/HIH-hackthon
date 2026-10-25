@@ -123,6 +123,15 @@ def runtime_privileges(db: "DB") -> dict | None:
     )
 
 
+def driver_errors() -> tuple[type[Exception], ...]:
+    """Exceptions that mean the database could not be reached or queried."""
+    try:
+        import psycopg
+    except ImportError:
+        return (sqlite3.Error, OSError)
+    return (sqlite3.Error, OSError, psycopg.Error)
+
+
 def _dict_row(cursor, row):
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 

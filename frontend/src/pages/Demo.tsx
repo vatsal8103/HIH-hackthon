@@ -3,7 +3,18 @@ import { useState, type ReactNode } from "react";
 import { api, type Attack, type RunCase, type RunDetail, type Verification } from "../api";
 import { OutcomeTag, ResponseText, TargetNotice, Technical, guardLine, useRuleName } from "../components/Explain";
 import { Note, PageHead, RiskTag, VerdictTag, dateTime, shortId } from "../components/ui";
-import { PLAIN_STAGE, RISK_PLAIN, TONE_TEXT, caseOutcome, checkpointPlain, eventPlain, isolationCounts, liveHost } from "../explain";
+import {
+  PLAIN_STAGE,
+  TONE_TEXT,
+  caseOutcome,
+  checkpointPlain,
+  eventPlain,
+  failedChecks,
+  failureDescriptions,
+  findingExplanation,
+  isolationCounts,
+  liveHost,
+} from "../explain";
 import { href, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -164,13 +175,17 @@ function TestStep({ attacks, selected, onSelect, item, run }: { attacks: Attack[
 function ResultStep({ item }: { item: RunCase }) {
   const { meta } = useLab();
   const first = item.baseline!;
-  const broken = first.criteria?.filter((c) => !c.passed) ?? [];
+  const failed = failedChecks(first);
+  const broken = failed ?? [];
+  const leaked = broken.some((id) => id === "no-secret-disclosure" || id === "no-pii-disclosure");
   return (
     <>
-      <p className={`text-[15px] leading-relaxed ${broken.length ? "text-rust-300" : "text-moss-300"}`}>
-        {broken.length
-          ? `On the first attempt the AI broke ${broken.length === 1 ? "a safety rule" : `${broken.length} safety rules`}. Highlighted text is what leaked.`
-          : "On the first attempt the AI followed its rules for this test."}
+      <p className={`text-[15px] leading-relaxed ${broken.length ? "text-rust-300" : failed ? "text-moss-300" : "text-bone-400"}`}>
+        {failed === null
+          ? "Which checks the first attempt failed was not recorded."
+          : broken.length
+            ? `On the first attempt ${failureDescriptions(first)!.join("; ")}.${leaked ? " Highlighted text is what leaked." : ""}`
+            : "On the first attempt the AI passed every check for this test."}
       </p>
       <div className="mt-6">
         <div className="flex items-baseline justify-between gap-3">
@@ -194,9 +209,9 @@ function ResultStep({ item }: { item: RunCase }) {
       </ul>
       <Say>
         {broken.length
-          ? `Here is what the AI actually said. It broke the rule${broken.length === 1 ? "" : "s"} “${broken
-              .map((c) => meta?.criteria[c.id]?.title ?? c.id)
-              .join("”, “")}”, so this attempt is recorded as a failure. The evaluator writes down the evidence for each rule.`
+          ? `Here is what the AI actually said. It failed the check${broken.length === 1 ? "" : "s"} “${broken
+              .map((id) => meta?.criteria[id]?.title ?? id)
+              .join("”, “")}”, so this attempt is recorded as a failure. The evaluator writes down the evidence for each check.`
           : "Here is what the AI actually said. It followed every rule for this test, so the attempt is recorded as a pass. That is one result, not a guarantee."}
       </Say>
     </>
@@ -205,7 +220,8 @@ function ResultStep({ item }: { item: RunCase }) {
 
 function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
   const ruleName = useRuleName();
-  const outcome = caseOutcome(item, ruleName);
+  const outcome = caseOutcome(item, ruleName, run.defenses.length);
+  const anyFailed = run.cases.some((c) => c.baseline?.verdict === "fail");
   const retry = item.retest!;
   const acted = guardLine(retry, ruleName);
   return (
@@ -217,7 +233,11 @@ function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
       <div className="mt-6">
         <p className="label">Protections the Blue Team added in this run</p>
         {run.defenses.length === 0 ? (
-          <p className="mt-2 text-[13.5px] text-bone-500">None: nothing in this run failed, so nothing was added.</p>
+          <p className="mt-2 text-[13.5px] text-bone-500">
+            {anyFailed
+              ? "None. Checks failed in this run, but the Blue Team's fixed playbook has no protection for the checks that failed."
+              : "None: nothing in this run failed, so nothing was needed."}
+          </p>
         ) : (
           <ul className="mt-2">
             {run.defenses.map((rule) => (
@@ -233,7 +253,7 @@ function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
       </div>
       <div className="mt-6">
         <div className="flex items-baseline justify-between gap-3">
-          <p className="label">The retry · same attack, protections on</p>
+          <p className="label">The retry · same attack, {run.defenses.length ? "protections on" : "no protection added"}</p>
           <VerdictTag verdict={retry.verdict} />
         </div>
         {acted && <p className="mt-2 text-[13px] text-moss-300">{acted}.</p>}
@@ -241,7 +261,8 @@ function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
       </div>
       <Say>
         The Blue Team never sees the attack itself, only a redacted summary of what failed. From that it added{" "}
-        {run.defenses.length === 1 ? "one protection" : `${run.defenses.length} protections`}. Then the same attack ran again. Result:{" "}
+        {run.defenses.length === 0 ? "no protection" : run.defenses.length === 1 ? "one protection" : `${run.defenses.length} protections`}. Then
+        the same attack ran again. Result:{" "}
         {outcome.label.toLowerCase()}. {outcome.sentence}
       </Say>
     </>
@@ -325,10 +346,12 @@ function EvidenceStep({ item, run }: { item: RunCase; run: RunDetail }) {
 
 function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
   const ruleName = useRuleName();
-  const outcome = caseOutcome(item, ruleName);
+  const outcome = caseOutcome(item, ruleName, run.defenses.length);
   const report = run.report!;
   const risk = item.residual?.residual_risk;
   const isolation = isolationCounts(run.isolation);
+  const { meta } = useLab();
+  const why = findingExplanation(item, run.defenses.length, ruleName, (id) => meta?.criteria[id]);
   return (
     <>
       <dl className="space-y-4">
@@ -336,12 +359,13 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
           <OutcomeTag outcome={outcome} /> · {outcome.sentence}
         </Field>
         <Field term="Remaining risk">
-          <RiskTag risk={risk} /> <span className="ml-2 text-bone-400">{risk ? RISK_PLAIN[risk] : ""}</span>
+          <RiskTag risk={risk} /> <span className="ml-2 text-bone-400">{why.severity ?? ""}</span>
         </Field>
-        {item.residual?.recommendation && <Field term="Next action">{item.residual.recommendation}</Field>}
+        <Field term="Why it matters">{why.impact}</Field>
+        <Field term={why.nextFromReport ? "Next action (recorded in the report)" : "Next action"}>{why.next}</Field>
         <Field term="The whole run">
-          {report.counts.cases} attack{report.counts.cases === 1 ? "" : "s"}: {report.counts.baseline_failures} worked at first,{" "}
-          {report.counts.residual_failures} still worked after the protections. Highest remaining risk:{" "}
+          {report.counts.cases} attack{report.counts.cases === 1 ? "" : "s"}: {report.counts.baseline_failures} failed a check at first,{" "}
+          {report.counts.residual_failures} still failed one on the retry ({report.defenses.length === 0 ? "no protection was added" : `${report.defenses.length} protection${report.defenses.length === 1 ? "" : "s"} added`}). Highest remaining risk:{" "}
           <span className={TONE_TEXT[report.overall_risk === "none" || report.overall_risk === "low" ? "good" : report.overall_risk === "medium" ? "warn" : "bad"]}>
             {report.overall_risk}
           </span>
@@ -376,7 +400,7 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
       </Technical>
       <Say>
         So, for this attack: {outcome.label.toLowerCase()}. Across the whole run, {report.counts.baseline_failures} of {report.counts.cases}{" "}
-        attacks worked at first and {report.counts.residual_failures} still work, so the highest remaining risk is {report.overall_risk}.
+        attacks failed a check at first and {report.counts.residual_failures} still failed one on the retry, so the highest remaining risk is {report.overall_risk}.
         Bayora doesn't claim the AI is safe: it shows what was tried, what failed, what the defense changed, and the evidence
         for all of it.
       </Say>

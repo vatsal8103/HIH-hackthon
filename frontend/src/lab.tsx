@@ -55,17 +55,25 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const fast = useRef(false);
   const busyRef = useRef(false);
 
+  // Metadata includes the target's readiness, asked of the target: reread it after every run
+  // so a provider that went down (or came back) is not reported from a stale answer.
+  const loadMeta = useCallback(
+    () =>
+      api
+        .meta()
+        .then((value) => (setMeta(value), setOnline(true)))
+        .catch((err: Error) => (setOnline(false), setError(err.message))),
+    [],
+  );
+
   useEffect(() => {
-    api
-      .meta()
-      .then((value) => (setMeta(value), setOnline(true)))
-      .catch((err: Error) => (setOnline(false), setError(err.message)));
+    void loadMeta();
     api
       .runs()
       .then((runs) => (runs[0] ? api.run(runs[0].id).then(setRun) : undefined))
       .then(() => setRunLoad("ready"))
       .catch((err: Error) => (setRunLoad("failed"), setError(`Could not load the latest run: ${err.message}`)));
-  }, []);
+  }, [loadMeta]);
 
   // Advance the session one real backend stage at a time, showing each result.
   const drive = useCallback(
@@ -76,7 +84,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
       try {
         while (current.next_stage) {
           const stage = current.next_stage;
-          const { executed, run: next, checkpoint } = await api.advance(current.id).catch((err: unknown) => {
+          const { executed, run: next, checkpoint } = await api.advance(current.id, stage).catch((err: unknown) => {
             setFailed({ runId: current.id, stage });
             throw err;
           });
@@ -95,9 +103,10 @@ export function LabProvider({ children }: { children: ReactNode }) {
       } finally {
         setPlaying(null);
         setVersion((v) => v + 1);
+        void loadMeta();
       }
     },
-    [reducedMotion],
+    [reducedMotion, loadMeta],
   );
 
   const guarded = useCallback(async (task: () => Promise<void>) => {

@@ -160,7 +160,7 @@ export function AttackLibrary() {
                 {lastCase ? (
                   <>
                     <p className="mt-2">
-                      <OutcomeTag outcome={caseOutcome(lastCase, ruleName)} />
+                      <OutcomeTag outcome={caseOutcome(lastCase, ruleName, run?.defenses.length)} />
                     </p>
                     <p className="mt-1 flex items-center gap-3 text-[13px] text-bone-400">
                       <VerdictTag verdict={lastCase.baseline?.verdict} /> <span aria-hidden>→</span>

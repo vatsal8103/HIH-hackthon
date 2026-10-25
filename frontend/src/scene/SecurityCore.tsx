@@ -1,7 +1,7 @@
 import { Component, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { RunDetail } from "../api";
-import { PLAIN_STAGE, stageResult } from "../explain";
+import { PLAIN_STAGE, completedReadout, stageResult } from "../explain";
 import { useReducedMotion } from "../hooks";
 import { useLab } from "../lab";
 import { LatticeFallback } from "./LatticeFallback";
@@ -37,10 +37,7 @@ function readout(run: RunDetail | null, stage: SceneStage, playing: boolean): st
   if (playing && stage !== "idle" && stage !== "created") {
     return `${PLAIN_STAGE[stage].name} · ${stageResult(run, stage)?.text ?? PLAIN_STAGE[stage].who}`;
   }
-  if (run.report) {
-    const { counts, audit } = run.report;
-    return `${counts.residual_failures} of ${counts.cases} still failing · ${run.defenses.length} protections · record ${audit.ok ? "intact" : "broken"}`;
-  }
+  if (run.report) return completedReadout(run);
   return `Paused after ${run.stage === "created" ? "start" : PLAIN_STAGE[run.stage].name}`;
 }
 

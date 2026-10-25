@@ -4,6 +4,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -73,7 +74,7 @@ def _target_control(target: dict) -> dict:
         return {**entry, "status": "unknown", "detail": detail}
     detail = (
         f"{target['provider'] or target['kind']}, a real language model, as reported by the {target['source']}. "
-        "Answers can vary between runs; the scripted checks are string-match heuristics, not a full audit."
+        "Answers can vary between runs; the scripted checks are pattern-matching heuristics, not a full audit."
     )
     if (target.get("provider") or "").startswith("groq/"):
         detail += " Hosted by Groq, a third party: prompts and the synthetic scenario are sent there."
@@ -203,6 +204,24 @@ app.add_middleware(
 )
 
 
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_HOSTS = {h.strip() for h in ALLOWED_HOSTS.split(",") if h.strip()}
+
+
+@app.middleware("http")
+async def refuse_cross_site_writes(request: Request, call_next):
+    """The proxy attaches the operator credential to every /api request, so a page on another
+    site must not be able to make the operator's browser send state-changing requests.
+    Browsers mark such requests (Sec-Fetch-Site, Origin); agents and probes send neither."""
+    if request.method in UNSAFE_METHODS:
+        site = request.headers.get("sec-fetch-site")
+        origin = request.headers.get("origin")
+        foreign_origin = origin is not None and (urlsplit(origin).hostname or "") not in _HOSTS
+        if site in ("cross-site", "same-site") or foreign_origin:
+            return JSONResponse(status_code=403, content={"detail": "Cross-site request refused"})
+    return await call_next(request)
+
+
 @app.exception_handler(pipeline.Conflict)
 def conflict_handler(_request: Request, exc: pipeline.Conflict):
     return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -221,7 +240,7 @@ def remote_handler(_request: Request, exc: remote.RemoteError):
 
 
 class RunCreate(BaseModel):
-    attack_ids: list[str] | None = None
+    attack_ids: list[str] | None = Field(default=None, max_length=50)
 
 
 class RedSubmit(BaseModel):
@@ -254,6 +273,19 @@ def _event_out(row: dict) -> dict:
     return {**row, "details": json.loads(row["details"])}
 
 
+def _status(session: dict) -> str:
+    # Stages run only inside an advance request, so an unfinished run is incomplete, not running.
+    return "completed" if session["stage"] == "report" else "incomplete"
+
+
+def _run_target(conn: db.DB, session: dict) -> dict:
+    """What answered as the target in this run, as recorded (report, else the latest target event)."""
+    deployment = (session["report"] or {}).get("deployment") or {}
+    if deployment.get("target_kind"):
+        return {"provider": deployment.get("target_provider"), "kind": deployment["target_kind"]}
+    return pipeline.recorded_target(conn, session["id"])
+
+
 def _run_detail(conn: db.DB, session: dict) -> dict:
     attempts = conn.all("SELECT * FROM attempts WHERE session_id = ? ORDER BY position", (session["id"],))
     by_key = {(a["attack_id"], a["phase"]): _attempt_out(a) for a in attempts}
@@ -267,7 +299,8 @@ def _run_detail(conn: db.DB, session: dict) -> dict:
         "created_at": session["created_at"],
         "stage": session["stage"],
         "next_stage": pipeline.next_stage(session),
-        "status": "completed" if session["stage"] == "report" else "running",
+        "status": _status(session),
+        "target": _run_target(conn, session),
         "cases": [
             {
                 "attack": BY_ID[attack_id],
@@ -288,7 +321,21 @@ def _run_detail(conn: db.DB, session: dict) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "storage": db.engine(), "target": "simulated"}
+    """Liveness plus one real database round trip. Unauthenticated, so it names no provider:
+    what answers as the target (and whether it is ready) is in /api/meta, asked of the target."""
+    try:
+        with db.connect() as conn:
+            conn.one("SELECT 1 AS ok")
+    except db.driver_errors() as exc:  # the API cannot serve runs without its database
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "storage": db.engine(),
+                "database": f"unreachable ({exc.__class__.__name__})",
+            },
+        )
+    return {"status": "ok", "storage": db.engine(), "database": "reachable"}
 
 
 @app.get("/api/meta")
@@ -317,18 +364,19 @@ def list_runs(_role: str = Depends(require("runs:read"))):
     with db.connect() as conn:
         rows = conn.all("SELECT id FROM sessions ORDER BY created_at DESC LIMIT 50")
         sessions = [pipeline.get_session(conn, r["id"]) for r in rows]
-    return [
-        {
-            "id": s["id"],
-            "created_at": s["created_at"],
-            "stage": s["stage"],
-            "status": "completed" if s["stage"] == "report" else "running",
-            "attack_ids": s["attack_ids"],
-            "overall_risk": s["report"]["overall_risk"] if s["report"] else None,
-            "counts": s["report"]["counts"] if s["report"] else None,
-        }
-        for s in sessions
-    ]
+        return [
+            {
+                "id": s["id"],
+                "created_at": s["created_at"],
+                "stage": s["stage"],
+                "status": _status(s),
+                "target": _run_target(conn, s),
+                "attack_ids": s["attack_ids"],
+                "overall_risk": s["report"]["overall_risk"] if s["report"] else None,
+                "counts": s["report"]["counts"] if s["report"] else None,
+            }
+            for s in sessions
+        ]
 
 
 @app.post("/api/runs", status_code=201)
@@ -353,11 +401,25 @@ def get_run(session_id: str, _role: str = Depends(require("runs:read"))):
         return _run_detail(conn, _session(conn, session_id))
 
 
+class Advance(BaseModel):
+    # The stage the caller means to run. Optional for older clients; when given, a repeated
+    # request (double click, retry after a timeout) is refused instead of running the next stage.
+    stage: Literal[tuple(pipeline.STAGES)] | None = None
+
+
 @app.post("/api/runs/{session_id}/advance")
-def advance_run(session_id: str, request: Request, _role: str = Depends(require("runs:write"))):
+def advance_run(
+    session_id: str,
+    request: Request,
+    body: Advance | None = None,
+    _role: str = Depends(require("runs:write")),
+):
+    expected = body.stage if body else None
     with db.connect() as conn:
         _session(conn, session_id)
-        stage = pipeline.advance(conn, session_id, request.app, request.headers.get("authorization"))
+        stage = pipeline.advance(
+            conn, session_id, request.app, request.headers.get("authorization"), expected
+        )
     # Committed. Anchor the new head; a failure here is reported, never hidden.
     with db.connect() as conn:
         anchor = checkpoint.publish(conn)

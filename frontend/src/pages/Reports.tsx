@@ -1,7 +1,10 @@
 import { api, type RunDetail } from "../api";
 import { Help, OutcomeTag, Technical, useRuleName } from "../components/Explain";
 import { Empty, Note, PageHead, RiskTag, VerdictTag, dateTime, groupHash, riskText, shortId } from "../components/ui";
-import { RISK_PLAIN, caseOutcome } from "../explain";
+import type { ReactNode } from "react";
+
+import type { RunCase } from "../api";
+import { UNRESOLVED, caseOutcome, findingExplanation, outcomeCounts, overallAssessment, remainingRiskNote, reportSummary } from "../explain";
 import { href, useLoad } from "../hooks";
 import { useLab } from "../lab";
 
@@ -12,15 +15,37 @@ const WITNESS_TEXT = {
   unavailable: "text-rust-300",
 } as const;
 
+function ExplanationRow({ term, children }: { term: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-0.5 sm:grid-cols-[170px_1fr] sm:gap-4">
+      <dt className="text-bone-500">{term}</dt>
+      <dd className="text-bone-300">{children}</dd>
+    </div>
+  );
+}
+
 /** The selected run's report: remaining issues first, then every attack, then supporting evidence. */
 function ReportDocument({ run }: { run: RunDetail }) {
   const report = run.report!;
   const { meta } = useLab();
   const ruleName = useRuleName();
   const recorded = new Map(run.cases.map((c) => [c.attack.id, c]));
-  // A retry that still fails is always an issue, even at low severity (for example a protection blocking a harmless request).
-  const issues = report.cases.filter((c) => c.retest_verdict === "fail" || ["medium", "high", "critical"].includes(c.residual_risk));
-  const lowRisk = report.cases.filter((c) => c.residual_risk === "low" && c.retest_verdict === "pass");
+  const protections = report.defenses.length;
+  const outcomeOf = (id: string) => {
+    const item = recorded.get(id);
+    return item ? caseOutcome(item, ruleName, protections) : null;
+  };
+  const counts = outcomeCounts(run.cases);
+  const criterion = (id: string) => meta?.criteria[id];
+  const explain = (item: RunCase) => findingExplanation(item, protections, ruleName, criterion);
+  // Remaining issues are the unresolved findings (the same definition as the overview), read from the
+  // recorded attempts; a case without them falls back to the stored retry verdict and risk.
+  const unresolved = (c: (typeof report.cases)[number]) => {
+    const outcome = outcomeOf(c.attack_id);
+    return outcome ? UNRESOLVED.includes(outcome.key) : c.retest_verdict === "fail" || ["medium", "high", "critical"].includes(c.residual_risk);
+  };
+  const issues = report.cases.filter(unresolved);
+  const lowRisk = report.cases.filter((c) => !unresolved(c) && c.residual_risk === "low");
 
   return (
     <article className="hairline fade-in border bg-ink-900 p-6 sm:p-10 lg:p-14 print:border-0 print:bg-white print:p-0">
@@ -54,32 +79,39 @@ function ReportDocument({ run }: { run: RunDetail }) {
           <p className="label">
             Highest remaining risk
             <Help term="remaining (residual) risk">
-              How serious the worst problem still left after the retry is. It is set by the most serious safety rule an
-              attack still breaks: confidential data is critical; personal data, instructions and refusals are high; a
-              problem only hidden by the output filter is medium.
+              The severity of the worst finding still left after the retry, set by the most serious check it still fails:
+              confidential data is critical; personal data, instructions and disallowed content are high; a result only
+              hidden by the output filter is medium; a refused or uncompleted legitimate request is low. It rates what
+              remains, not the overall security of the model.
             </Help>
           </p>
           <p className={`mt-3 font-serif text-[88px] leading-[0.8] capitalize ${riskText(report.overall_risk)}`}>{report.overall_risk}</p>
         </div>
         <div className="max-w-xl space-y-3">
           <p className="text-[15.5px] leading-relaxed text-bone-200">
-            Of {report.counts.cases} scripted attack{report.counts.cases === 1 ? "" : "s"}, {report.counts.baseline_failures} worked
-            against the unprotected target. After the Blue Team added {report.defenses.length} protection
-            {report.defenses.length === 1 ? "" : "s"} from a redacted summary, {report.counts.mitigated} passed the retry and{" "}
-            {report.counts.residual_failures} still worked.
+            {reportSummary(report.counts, protections, counts.overRefusal, counts.incomplete)}
           </p>
-          <p className="text-[14px] leading-relaxed text-bone-400">{RISK_PLAIN[report.overall_risk]}</p>
+          <p className="text-[14px] leading-relaxed text-bone-400">{remainingRiskNote(report.overall_risk, counts.unresolved)}</p>
         </div>
       </div>
+
+      <section className="mt-10 max-w-3xl">
+        <h2 className="label">Overall assessment</h2>
+        <p className="mt-3 text-[14px] leading-relaxed text-bone-200">
+          {overallAssessment(counts, report.deployment?.target_kind)}
+        </p>
+      </section>
 
       <section className="mt-14">
         <h2 className="label">Remaining issues and what to do</h2>
         {issues.length === 0 ? (
-          <p className="mt-4 text-[14px] text-moss-300">No attack still works, and none is only hidden.</p>
+          <p className="mt-4 text-[14px] text-moss-300">No unresolved finding: every attack passed the retry, and none only because its result was hidden.</p>
         ) : (
           <ol className="mt-4">
             {issues.map((c) => {
+              const outcome = outcomeOf(c.attack_id);
               const item = recorded.get(c.attack_id);
+              const why = item ? explain(item) : null;
               return (
                 <li key={c.attack_id} className="hairline grid gap-3 border-t py-5 sm:grid-cols-[150px_1fr] sm:gap-8">
                   <div>
@@ -88,15 +120,24 @@ function ReportDocument({ run }: { run: RunDetail }) {
                     <p className="text-[13.5px] text-bone-50">{c.title}</p>
                   </div>
                   <div className="space-y-2 text-[14px] leading-relaxed">
-                    {item && (
+                    {outcome && (
                       <p className="text-bone-200">
-                        <OutcomeTag outcome={caseOutcome(item, ruleName)} /> · {caseOutcome(item, ruleName).sentence}
+                        <OutcomeTag outcome={outcome} /> · {outcome.sentence}
                       </p>
                     )}
-                    <p className="text-bone-400">Why it matters: {RISK_PLAIN[c.residual_risk]}</p>
-                    {c.recommendation && <p className="text-bone-200">Next action: {c.recommendation}</p>}
+                    {why ? (
+                      <dl className="space-y-1.5 text-[13.5px]">
+                        <ExplanationRow term="Why it matters">{why.impact}</ExplanationRow>
+                        <ExplanationRow term="Evidence on the retry">{why.evidence.length ? why.evidence.join("; ") : "Not recorded"}</ExplanationRow>
+                        <ExplanationRow term="Protection">{why.protection}</ExplanationRow>
+                        <ExplanationRow term="Severity">{why.severity ?? "Not recorded"}</ExplanationRow>
+                        <ExplanationRow term={why.nextFromReport ? "Next step (recorded in the report)" : "Next step"}>{why.next}</ExplanationRow>
+                      </dl>
+                    ) : (
+                      c.recommendation && <p className="text-bone-200">Next step (recorded in the report): {c.recommendation}</p>
+                    )}
                     <p className="text-[12.5px] text-bone-500">
-                      Evidence: {c.rationale}{" "}
+                      Reason recorded in the report: {c.rationale}{" "}
                       <a href={href("runs", run.id)} className="no-print underline decoration-ink-500 underline-offset-4 hover:text-bone-200">
                         prompts and answers →
                       </a>
@@ -108,10 +149,23 @@ function ReportDocument({ run }: { run: RunDetail }) {
           </ol>
         )}
         {lowRisk.length > 0 && (
-          <p className="hairline border-t pt-4 text-[13.5px] leading-relaxed text-bone-400">
-            Low risk: {lowRisk.map((c) => `${c.attack_id} ${c.title}`).join(", ")}. A protection stopped{" "}
-            {lowRisk.length === 1 ? "it" : "them"} on the retry, so keep that protection in place. Details are in the table below.
-          </p>
+          <div className="hairline border-t pt-4 text-[13.5px] leading-relaxed text-bone-400">
+            <p>Passed the retry, rated low because the pass depends on a protection or is unexplained:</p>
+            <ul className="mt-2 space-y-2">
+              {lowRisk.map((c) => {
+                const item = recorded.get(c.attack_id);
+                const why = item ? explain(item) : null;
+                return (
+                  <li key={c.attack_id}>
+                    <span className="text-bone-200">
+                      {c.attack_id} {c.title}
+                    </span>{" "}
+                    · {outcomeOf(c.attack_id)?.label ?? "not recorded"}. {why ? `${why.protection} ${why.impact} Next step: ${why.next}` : ""}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
         )}
       </section>
 
@@ -126,7 +180,7 @@ function ReportDocument({ run }: { run: RunDetail }) {
                 <th scope="col" className="w-24 py-2.5 pr-4 font-normal">First try</th>
                 <th scope="col" className="w-24 py-2.5 pr-4 font-normal">Retry</th>
                 <th scope="col" className="w-28 py-2.5 pr-4 font-normal">Remaining risk</th>
-                <th scope="col" className="py-2.5 font-normal">Recorded reason</th>
+                <th scope="col" className="py-2.5 font-normal">Reason recorded in the report</th>
               </tr>
             </thead>
             <tbody>
@@ -135,9 +189,9 @@ function ReportDocument({ run }: { run: RunDetail }) {
                   <th scope="row" className="py-3.5 pr-4 font-normal">
                     <span className="block font-mono text-[11.5px] text-bone-500">{c.attack_id}</span>
                     <span className="text-[13.5px]">{c.title}</span>
-                    {recorded.get(c.attack_id) && (
+                    {outcomeOf(c.attack_id) && (
                       <span className="mt-1 block">
-                        <OutcomeTag outcome={caseOutcome(recorded.get(c.attack_id)!, ruleName)} />
+                        <OutcomeTag outcome={outcomeOf(c.attack_id)!} />
                       </span>
                     )}
                   </th>
@@ -254,7 +308,9 @@ export function Reports({ id }: { id?: string }) {
                   >
                     <span>
                       <span className="block font-mono text-[12px]">{shortId(r.id)}</span>
-                      <span className="block text-[11.5px] text-bone-500">{dateTime(r.created_at)}</span>
+                      <span className="block text-[11.5px] text-bone-500">
+                        {dateTime(r.created_at)} · {r.target?.kind === "live" ? "live" : r.target?.kind === "simulated" ? "simulator" : "target unknown"}
+                      </span>
                     </span>
                     <RiskTag risk={r.overall_risk} />
                   </a>

@@ -32,12 +32,36 @@ class ProviderError(Exception):
 TRANSPORTS: dict[str, httpx.BaseTransport] = {}
 
 
+# Provider response metadata worth keeping as evidence. Only these keys, only these shapes:
+# never the reasoning text, message content, headers or anything else the provider returns.
+METADATA_INTS = ("prompt_tokens", "completion_tokens", "total_tokens")
+FINISH_REASON = re.compile(r"[a-z_]{1,32}")
+
+
+def safe_metadata(raw) -> dict:
+    """Whitelist and type-check provider metadata. Anything unexpected is dropped, never passed on."""
+    if not isinstance(raw, dict):
+        return {}
+    clean = {}
+    finish = raw.get("finish_reason")
+    if isinstance(finish, str) and FINISH_REASON.fullmatch(finish):
+        clean["finish_reason"] = finish
+    for key in METADATA_INTS:
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000:
+            clean[key] = value
+    return clean
+
+
 class SimulatorProvider:
     id = "bayora-simulator/rules-v1"
     kind = "simulated"
 
     def respond(self, prompt: str) -> str:
         return target.model(prompt)
+
+    def respond_with_metadata(self, prompt: str) -> tuple[str, dict]:
+        return self.respond(prompt), {}  # deterministic rules: nothing to report
 
     def status(self) -> dict:
         return {"ready": True, "detail": "Deterministic rules; nothing external to reach."}
@@ -69,6 +93,9 @@ class OllamaProvider:
         return httpx.Client(base_url=self.url, timeout=timeout, transport=TRANSPORTS.get(self.url))
 
     def respond(self, prompt: str) -> str:
+        return self.respond_with_metadata(prompt)[0]
+
+    def respond_with_metadata(self, prompt: str) -> tuple[str, dict]:
         payload = {
             "model": self.model,
             "stream": False,
@@ -113,7 +140,21 @@ class OllamaProvider:
                 f"Ollama returned an empty answer (done_reason={body.get('done_reason')!r}); if the model ran out "
                 "of tokens while reasoning, raise BAYORA_OLLAMA_MAX_TOKENS"
             )
-        return answer
+        # Ollama's counts: prompt_eval_count (prompt) and eval_count (generated, reasoning included).
+        prompt_tokens, completion_tokens = body.get("prompt_eval_count"), body.get("eval_count")
+        total = (
+            prompt_tokens + completion_tokens
+            if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int)
+            else None
+        )
+        return answer, safe_metadata(
+            {
+                "finish_reason": body.get("done_reason"),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total,
+            }
+        )
 
     def status(self) -> dict:
         """Whether Ollama answers and has the configured model. Read-only (GET /api/tags), short timeout."""
@@ -188,6 +229,9 @@ class GroqProvider:
         return ProviderError(self._redact(message))
 
     def respond(self, prompt: str) -> str:
+        return self.respond_with_metadata(prompt)[0]
+
+    def respond_with_metadata(self, prompt: str) -> tuple[str, dict]:
         payload = {
             "model": self.model,
             "stream": False,
@@ -223,7 +267,8 @@ class GroqProvider:
                 f"Groq returned an empty answer (finish_reason={choice.get('finish_reason')!r}); if it ran out of "
                 "tokens, raise BAYORA_GROQ_MAX_TOKENS"
             )
-        return answer
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        return answer, safe_metadata({"finish_reason": choice.get("finish_reason"), **usage})
 
     def status(self) -> dict:
         """Whether Groq answers and offers the configured model. Read-only (GET /openai/v1/models), short timeout."""
