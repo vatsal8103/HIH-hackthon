@@ -26,7 +26,7 @@ One test runs in seven recorded steps:
 
 Every step is written to a hash-linked audit record (each entry carries the previous entry's fingerprint, so edits, deletions and reordering are detected). In the Docker stack a separate witness service also keeps checkpoints, which catch even a complete rewrite of anything already checkpointed. Events after the latest checkpoint are not covered until the next one, and someone who controls both the database and the witness's storage could still alter both: this is tamper detection, not tamper-proofing.
 
-Results use careful words: **Passed this test**, **Stopped by a protection**, **Hidden, not fixed** (an output filter removed the leak but the AI still tried), **Still vulnerable**, **Failed the retry**. A passed test means no failure was detected in that test, never that the AI is safe.
+Results use careful words: **Passed this test**, **Stopped by a protection**, **Hidden, not fixed** (an output filter removed the leak but the AI still tried), **Still vulnerable**, **Failed the retry**, **Refused a legitimate request** (over-refusal, not a leak), **Passed the retry** (no protection acted, so none is credited) and **Failed, reason not recorded**. A passed test means no failure was detected in that test, never that the AI is safe.
 
 ### Guided demo and presenter script
 
@@ -35,7 +35,7 @@ Open the UI, then **Guided demo** in the navigation (`#/demo`). It walks through
 **A repeatable demo sequence** (Docker, about four minutes):
 
 1. **Overview** (`http://127.0.0.1:8080`): read the headline and the "Demo environment · Target behavior is simulated" notice. Press **Run a security test** and let the seven steps play (about 15 seconds; **Skip the animation** shortens it).
-2. **The latest run** on the same page: the four numbers (attacks tested, passed on retest, still vulnerable, highest remaining risk), then **Needs attention**. Select a finding to explain it in the panel; its **Technical evidence** disclosure shows the recorded rule results.
+2. **The latest run** on the same page: the four numbers (attacks tested, passed on retest, unresolved findings, highest remaining risk), then **Needs attention**, which lists the same unresolved findings. Select a finding to explain it in the panel; its **Technical evidence** disclosure shows the recorded rule results.
 3. **Guided demo**: step through 1–6 with the default attack PI-01, reading the "Say this" lines. In step 5 press **Verify the whole record now**.
 4. **Risk reports**: the remaining issues, why each matters, and the next action.
 5. **Audit trail**: the verification status at the top, then **Rewrite the chain** under Tamper simulation. The record's own links still verify, but the witness catches it. The stored record is never modified.
@@ -261,18 +261,18 @@ Errors are explained and never replaced by another provider's answer: a rejected
 
 ```bash
 cd backend
-uv run pytest                     # 141 unit tests on SQLite (12 PostgreSQL-only tests skip)
-TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 153 on PostgreSQL (needs a superuser; creates role bayora_app_test)
+uv run pytest                     # 181 unit tests on SQLite (12 PostgreSQL-only tests skip)
+TEST_DATABASE_URL="postgresql:///bayora_test?host=/tmp" uv run pytest   # all 193 on PostgreSQL (needs a superuser; creates role bayora_app_test)
 uv run ruff check . && uv run ruff format --check .
 
 cd ..
-./scripts/compose-test.sh         # 61 container/network tests on a throwaway stack (bayora-test, port 18080)
+./scripts/compose-test.sh         # 61 container/network tests on a throwaway stack (bayora-test, port 18080; always the simulator)
 COMPOSE_PROFILES=live ./scripts/compose-test.sh   # also the 3 ollama-proxy tests (64)
 COMPOSE_PROFILES=groq ./scripts/compose-test.sh   # also the 3 groq-proxy tests (64; one makes a read-only call to Groq)
 
 cd frontend
 npm run build                     # TypeScript strict check + production build
-npm test                          # 20 tests: plain-language rules and API error handling (Node's built-in test runner)
+npm test                          # 24 tests: plain-language rules and API error handling (Node's built-in test runner)
 ```
 
 `compose-test.sh` builds a separate Compose project, runs `backend/tests_compose/` against it, and removes it and its volumes afterwards. It never touches the main `bayora` stack.
@@ -290,10 +290,21 @@ curl -s localhost:8000/api/target/sessions/$RUN/inbox -H "Authorization: Bearer 
 
 In Docker these static role tokens do not exist: Red and Blue must sign requests, and the target has no credential. The API is not published at all. The edge proxy answers only for `127.0.0.1` or `localhost` (DNS-rebinding protection), acts only as the operator, and refuses `/api/red|blue|target/`. The API itself also rejects unknown `Host` headers (`BAYORA_ALLOWED_HOSTS`).
 
+## Health and run status
+
+- `GET /api/health` (no credential) checks the database with one query: 200 `{"status":"ok","database":"reachable"}` or 503 `degraded`. It does not report the target; `/api/meta` does, by asking the target.
+- A run is `completed` once its report exists, otherwise `incomplete`. Stages only run while a request advances them, so an incomplete run is stopped, not running; **Resume** continues it.
+- Each run records which target answered (`target` in `/api/runs`); the Test runs table and reports list show "Simulator" or the live model.
+- `POST /api/runs/{id}/advance` accepts `{"stage": "<next stage>"}`; a repeated request for a stage that already ran gets 409 instead of running the next one. Concurrent advances for one session run the stage once.
+
+## Engineering audit
+
+[docs/ENGINEERING_AUDIT.md](docs/ENGINEERING_AUDIT.md) records the state of the project after the 2026-10-25 audit: what is verified, what is only implemented, the defects fixed, the test evidence and the remaining limitations.
+
 ## Known limitations and caveats
 
 - **By default the target is a simulator.** It follows fixed rules, so results show how the method works, not how a real model behaves; the UI shows "Demo environment" because `/api/meta` reports `target.kind: simulated`.
-- **Live AI mode is slow and only heuristically evaluated.** qwen3:4b reasons at length: 22 to 244 seconds per answer on an M3, about 20 to 25 minutes for a full seven-attack run. Its answers can vary between runs (temperature 0 and a fixed seed reduce, not remove, variation). The evaluator's exact-string checks miss paraphrased, partial or encoded leaks, and count a refusal only if it opens with the scenario's refusal sentence. Reasoning text is not evaluated.
+- **Live AI mode is slow and only heuristically evaluated.** qwen3:4b reasons at length: 22 to 244 seconds per answer on an M3, about 20 to 25 minutes for a full seven-attack run. Its answers can vary between runs (temperature 0 and a fixed seed reduce, not remove, variation). The evaluator's checks are pattern-matching heuristics: they normalise case, spacing, Markdown and quotes, match the scenario's known secret and patient values in common alternate forms (and inside bounded Base64), recognise common refusal openers, and require II-04's summary to actually appear. They still miss reworded, summarised or translated leaks and unusual refusals. Reasoning text is never evaluated or stored; new target audit events record only the provider's finish reason and token counts.
 - **The Blue Team is a fixed playbook,** mapping each failed rule to one protection.
 - **Seven scripted attacks are not a security audit.** A passed test shows that one attack failed here, nothing about attacks that were not tried.
 - **Dev mode is weaker than Docker.** Locally the roles run inside the API process, there is no witness unless you start one, and the UI says so (Roles: in-process, Anchor: none, and the isolation checks marked simulated or planned). Container, network, credential and database-privilege controls exist only in the Docker stack.
@@ -315,7 +326,7 @@ backend/app/
   pipeline.py    session state machine; in-process or agent-backed role stages
   remote.py      outbound calls to agents and the witness (failures raise, never fall back)
   checkpoint.py  publish the chain head to the witness; verify the chain against it
-  providers.py   target model provider interface (simulator only)
+  providers.py   target model providers: simulator, Ollama, Groq (one interface, no fallback)
   isolation.py   permission probes, data checks, agent network/container checks
   audit.py       hash chain, verification and tamper simulation
   attacks.py · target.py · defenses.py · evaluator.py · db.py
