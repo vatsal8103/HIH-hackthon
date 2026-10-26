@@ -1208,3 +1208,15 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: The standalone script uses Python standard library only (`sqlite3`, `hashlib`, `json`, `argparse`, `pathlib`) for maximum portability across any auditor machine.
 - Verification: 5 unit and negative tamper tests in `backend/tests/test_verify_audit.py` passed, `ruff check` and `ruff format` clean.
 
+## 2026-10-26 — Public Safety Benchmarks & Full Lifecycle Verification (Phase 8)
+- Status: Active
+- Decision: Validate public safety benchmark integration (Gandalf, JailbreakBench, AdvBench, HarmBench) across the 32 attack definitions, confirming that attacks with distinct safety criteria (`no-secret-disclosure`, `instruction-hierarchy`, `refuse-disallowed`, `no-pii-disclosure`) execute through the entire 7-stage pipeline (attack -> respond -> evaluate -> defend -> retest -> isolation -> report) with consistent verdict scoring, defense rule generation, and audit integrity in local-process mode.
+- Reason: The red-teaming lab must evaluate real adversarial tactics from published literature rather than only toy examples, while proving that role isolation and audit guarantees hold equally across diverse benchmarks.
+- Approach chosen:
+  - **Attack Catalogue Validation (`backend/app/attacks.py`, `scripts/import_attacks.py`)**:
+    - Validated 7 core clinic attacks (`BN-00` to `BN-06`) plus 25 imported benchmark definitions (`GD-*`, `JB-*`, `AB-*`, `HB-*`) across prompt injection, jailbreak prefixing, harmful requests, and persona escapes.
+  - **Full Lifecycle Integration Testing (`backend/tests/test_imported_attacks.py`)**:
+    - Added `test_imported_attacks_full_lifecycle` testing a session configured with imported benchmarks (`GD-01`, `JB-03`, `AB-01`).
+    - Verified execution across all 7 stages to `report`, confirming case counts, defense mitigation, and `report["audit"]["ok"] is True`.
+- Verification: 7 unit tests in `backend/tests/test_imported_attacks.py` passed, `ruff check` and `ruff format` clean.
+
