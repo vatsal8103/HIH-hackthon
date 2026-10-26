@@ -1058,3 +1058,21 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Collapsible disclosure with raw `docs/THREAT_MODEL.md` specification.
 - Trade-offs: Exposed threat model data via a dedicated API endpoint rather than purely static client markdown to allow backend unit tests to enforce threat documentation completeness and status accuracy.
 - Verification: 3 unit tests in `backend/tests/test_threat_model.py` (document existence & coverage, API structure & status validation, operator permissions). Full backend suite (279 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 58 frontend unit tests passed.
+
+## 2026-10-26 — Demo polish, scripts, guided demo enhancements, and judge Q&A (Part 6)
+- Status: Active
+- Decision: Update `README.md` with the new capability matrix rows, update `frontend/src/pages/Demo.tsx` to include live monitoring alert triggering, cross-session contamination inspection, and interactive tamper simulation, create executable demonstration scripts (`scripts/demo.sh` and `scripts/demo.ps1`), and create comprehensive presenter materials in `docs/DEMO_SCRIPT.md`.
+- Reason (Stated by user): Polish the demonstration flow for judges, showcase continuous monitoring, cross-session isolation, and witness tamper detection interactively, and provide honest answers to key technical questions.
+- Approach chosen:
+  - **Guided Demo Enhancements (`Demo.tsx`)**:
+    - Step 3 (Defense): Injected a live zero-knowledge continuous monitoring demo trigger (`POST /api/alerts/demo`) showcasing that alerts log coarse reason codes (`DEMO_VIOLATION`) while keeping prompt text and defense rules 100% redacted.
+    - Step 4 (Evidence): Added an interactive tamper-detection simulation panel alongside whole-chain verification. Judges can observe that modifying or deleting database records immediately trips the SHA-256 hash continuity and witness proof.
+    - Step 5 (Conclusion): Added an explicit Cross-Session LLM Isolation card displaying `ISO-09` context guard and `ISO-10` canary probe status.
+  - **Executable Demo Scripts (`scripts/demo.sh` & `scripts/demo.ps1`)**:
+    - Automated environment key initialization, multi-container Docker compose startup, health check polling, initial baseline test execution, and presentation ordering output.
+  - **Presenter Guide & Judge Q&As (`docs/DEMO_SCRIPT.md`)**:
+    - Formatted 3-minute stage-by-stage demo script matching the 6-step guided demo.
+    - Documented honest engineering answers for the 5 most likely judge questions (simulated vs live models, shared kernel vs microVMs, witness tampering defense, timing side-channel mitigation limits, and cross-session isolation guarantees).
+- Trade-offs: Demo simulation controls run in-memory simulations without corrupting persistent database storage, ensuring the live demo can be repeated indefinitely.
+- Verification: Full backend test suite (279 passed, 12 skipped, 0 failures), `ruff check` clean, frontend `tsc --noEmit` clean, frontend production build (`npm run build`) clean, and 58 frontend unit tests passed.
+
