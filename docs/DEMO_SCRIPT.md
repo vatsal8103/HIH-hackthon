@@ -1,4 +1,4 @@
-# Bayora: 3-Minute Judge Presentation Script & Top 5 Q&A
+# Bayora: 3-Minute Judge Presentation Script & Top 6 Q&A
 
 **Hack in Hills '26 · Track 4: Securing Adversarial AI Safety Testing Infrastructure**
 
@@ -7,73 +7,80 @@
 ## 1. 3-Minute Demo Script
 
 ### [0:00 – 0:45] The Problem & The Architecture
-- **Navigate to:** `http://127.0.0.1:8080/#/` (Overview)
+- **Navigate to:** `http://localhost:5173/#/` (Overview)
 - **Presenter:**
-  > "Welcome to Bayora. When enterprises deploy LLMs — like this clinic assistant — they face a severe dilemma: adversarial AI red-teaming is essential to find prompt injection and data leaks, but the safety testing infrastructure itself is highly vulnerable. Red teams shouldn't see Blue defenses; Blue teams shouldn't see unredacted attack payloads; and test sessions cannot contaminate one another.
+  > "Welcome to Bayora. In Track 4, we tackle a critical vulnerability in adversarial AI evaluation: Red teams, Blue teams, and the target model must run concurrently on shared infrastructure without leaking secrets or contaminating results.
   >
-  > Bayora is a zero-knowledge adversarial AI safety testing lab. Notice our 3D Security Core: each facet represents an evaluated security boundary. The pipeline on screen shows our seven strictly segmented stages: Attack, Respond, Evaluate, Defend, Retest, Isolate, and Report."
+  > In many real-world environments, Docker is unavailable due to policy, host constraints, or bare-metal execution. Bayora achieves real role isolation without Docker. Notice our system deployment status: we run 6 independent host processes on distinct loopback ports (8000 through 8004), isolated directories with restrictive 0700/0600 permissions, scrubbed per-process environments, and OS sandboxing via Linux bubblewrap namespaces or Windows Job Objects."
 
 ### [0:45 – 1:30] Execution, Evaluation & Zero-Knowledge Defense
-- **Navigate to:** `http://127.0.0.1:8080/#/demo` (Guided Demo)
+- **Navigate to:** `http://localhost:5173/#/demo` (Guided Demo)
 - **Presenter:**
   > "Let's walk through our guided test case with attack `PI-01: Direct instruction override`.
   >
-  > On step 2, the Red team attempts to force the assistant to dump its internal configuration and secret canary token.
+  > On step 2, the Red team attempts to force the assistant to dump its internal configuration and secret canary token. Notice: the Target agent holds zero signing keys and cannot initiate outbound requests.
   >
   > On step 3, our Evaluator analyzes the output: the baseline model failed and leaked confidential data.
   >
   > On step 4, the Blue team responds. Notice the strict boundary: Blue receives only a redacted failure code, never the attack prompt. From this, Blue activates the `instruction-guard` filter. On the retest, the injection is blocked at the perimeter."
 
 ### [1:30 – 2:15] Continuous Monitoring & Cryptographic Witness Verification
-- **Presenter (Still on Step 4 & 5 of `#demo`):**
-  > "While tests run, our continuous monitor watches for unauthorized access. Right here on Step 4, let's trigger a live boundary violation alert. Notice that the alert logs only the role, timestamp, and coarse reason code `DEMO_VIOLATION` — zero attack or defense text is leaked.
+- **Presenter (Still on Step 4 & 5 of `#/demo`):**
+  > "While tests run, our continuous monitor watches for unauthorized access. Right here on Step 4, let's trigger a live boundary violation alert. Notice that the alert logs only the role, timestamp, and coarse reason code `DEMO_VIOLATION` — zero attack or defense text is leaked. If an agent process crashes, our `PROCESS_CRASH` handler immediately records an audit alert before returning 502.
   >
-  > Now look at Step 5: Evidence. Every single prompt, response, metric, and alert is hashed into a SHA-256 chain and anchored to an independent witness container.
+  > Now look at Step 5: Evidence. Every prompt, response, metric, and alert is hashed into a SHA-256 chain and anchored to an independent witness daemon on port 8001.
   >
   > Judges often ask: what if an attacker with database root access modifies or deletes a finding? Let's click **'Simulate record modification'**. Immediately, verification fails: the hash link breaks and mismatches the witness. Tampering is mathematically impossible to conceal."
 
-### [2:15 – 3:00] Cross-Session Isolation & Honest Threat Model
-- **Navigate to:** Step 6 of `#demo` and `http://127.0.0.1:8080/#/reports`
+### [2:15 – 3:00] Offline Verification, Isolation Probes & Honest Threat Model
+- **Navigate to:** `http://localhost:5173/#/lab` (Isolation Lab) and `http://localhost:5173/#/reports`
 - **Presenter:**
-  > "On Step 6, we verify LLM cross-session isolation: our `ISO-09` context guard and `ISO-10` canary tests prove that Session A cannot contaminate Session B through conversational residue.
+  > "In the Isolation Lab, our empirical barrier probes classify network boundaries: distinguishing between packet-level OS blocks and cryptographic authentication barriers (`ISO-06`). `ISO-07` reports our detected host sandbox strength.
   >
-  > Finally, let's open our **Architecture Threat Model** under Risk Reports. We don't claim magical security. We provide an honest matrix of 11 threats: from cryptographic witness proof (Implemented and tested) to container kernel sharing (Partial, requiring microVMs in future work).
+  > To prove audit integrity outside the web app, we provide a standalone zero-dependency CLI tool: `python scripts/verify_audit.py --db backend/bayora.db --export evidence_bundle.json`. It verifies sequence monotonicity, hash chaining, and evidence digests offline.
   >
-  > Bayora provides the verifiable, zero-knowledge foundation needed to red-team AI models safely."
+  > Finally, in our Architecture Threat Model, we don't claim magical security. We provide an honest matrix of 14 threats: clearly labeling what is OS-level, cryptographic, simulated, or residual risk."
 
 ---
 
-## 2. Top 5 Judge Questions & Honest Engineering Answers
+## 2. Top 6 Judge Questions & Honest Engineering Answers
 
-### Q1: "Why use a simulated target and a fixed Blue playbook instead of live LLMs for everything?"
+### Q1: "How do you achieve real isolation without Docker or virtualization?"
 **Honest Answer:**
-> "Reproducibility and regression testing. In security testing infrastructure, tests must be 100% deterministic so you know that an isolation failure or canary leak is caused by an architectural regression, not LLM stochastic noise. 
-> 
-> However, Bayora fully supports live LLMs: we include providers for local Ollama and hosted Groq API models. When live mode is enabled, the UI clearly displays transparency warnings that prompts leave the container."
+> "Through defense-in-depth across 5 layers:
+> 1. **Process boundaries:** 6 independent OS processes communicating strictly over loopback (`127.0.0.1:8000..8004`).
+> 2. **Filesystem segregation:** `.run/<role>` directories with 0700 directory permissions and 0600 file DACLs generated by `app.local_setup`.
+> 3. **Environment scrubbing:** `app.agent_runner` purges foreign `BAYORA_<ROLE>_*` keys before child execution.
+> 4. **OS sandboxing primitives:** Linux unprivileged namespaces via bubblewrap (`bwrap --unshare-user --unshare-pid`), firejail, or Windows Job Objects with process assignment and quota containment.
+> 5. **Network barrier controls:** Host firewall rules (iptables owner-match or NetFirewallRule) and empirical barrier classification in `ISO-06`."
 
-### Q2: "Does Docker container isolation guarantee protection against hostile executable code?"
+### Q2: "Can Red read Blue's files or memory on the same host?"
 **Honest Answer:**
-> "No, and we are completely transparent about this in our Threat Model (`docs/THREAT_MODEL.md`). Docker containers share the host Linux kernel. 
+> "By default with dedicated service accounts (`bayora-red`, `bayora-blue`) or bubblewrap mount namespaces, POSIX 0700/0600 permissions and filesystem unsharing prevent cross-role file inspection.
 > 
-> We implement defense-in-depth: non-root execution (`nobody`), dropping all Linux capabilities (`cap_drop: ALL`), read-only root filesystems, `no-new-privileges: true`, custom seccomp profiles, and PID/memory quotas. However, protection against 0-day kernel exploits requires hardware-level microVMs (such as AWS Firecracker, gVisor `runsc`, or Kata Containers), which we document as our planned next step."
+> In `backend/tests/test_os_sandboxing.py::test_file_isolation_verification`, we programmatically probe cross-role read access. We honestly document in our Threat Model that if all processes run under the same unprivileged user without bubblewrap or service accounts, filesystem permissions are discretionary, which is why we provide automated provisioning scripts (`scripts/setup_users.sh` and `.ps1`)."
 
-### Q3: "How does the witness service prevent audit tampering if the database is compromised?"
+### Q3: "What prevents Red from connecting directly to Blue's loopback port?"
 **Honest Answer:**
-> "Through architectural segmentation and independent cryptographic checkpoints. The audit log is an append-only SHA-256 hash chain where every event commits to the hash of the preceding event. 
-> 
-> Crucially, the witness runs in a separate Docker container on an isolated internal network (`witness_net`) with its own independent volume. After each stage, the control plane sends a cryptographic checkpoint to the witness. Even if an attacker gains database superuser access and rewrites the database rows, the recomputed root hash will conflict with the witness log's immutable checkpoint, immediately failing verification."
+> "Two complementary barriers:
+> 1. **Cryptographic authentication:** Every agent endpoint (`/v1/act`, `/v1/respond`) strictly requires a valid Ed25519 session grant issued and signed by the Control Plane. A direct probe from Red without a valid grant is rejected (HTTP 401/422).
+> 2. **Host firewall packet filtering:** Our firewall scripts (`scripts/setup_firewall.sh` via iptables owner-match UID filtering, and Windows NetFirewallRule) block local processes from cross-connecting across agent ports 8002, 8003, and 8004. Our `ISO-06` probe classifies this empirically as 'blocked by OS' vs 'blocked by authentication only'."
 
-### Q4: "Can timing side channels or burst traffic from Red leak information about Blue defenses or model state?"
+### Q4: "How does the standalone offline verifier prove audit integrity?"
 **Honest Answer:**
-> "We addressed this in Part 3 with discrete response-time quantization. Our control plane middleware quantizes Red and Blue endpoint elapsed durations into 10ms quantum buckets (`X-Timing-Protection: quantized`). Furthermore, container CPU (0.5 cores) and memory (256MB) limits prevent denial-of-service or resource starvation. 
+> "`scripts/verify_audit.py` operates completely offline without running the FastAPI app. It opens the SQLite database in URI read-only mode (`mode=ro`), recomputes SHA-256 digests over canonical JSON across all hashed fields, checks sequence continuity, verifies attempt prompt/response digests, and validates external witness checkpoint logs.
 > 
-> In our report disclaimer, we honestly note that microarchitectural CPU cache contention (Flush+Reload) on shared physical cores cannot be eliminated without dedicated hardware core pinning (`cpuset`)."
+> Furthermore, it exports a portable evidence bundle JSON (`--export evidence_bundle.json`) for external compliance auditing. If an attacker tampers with even one byte or deletes an event, verification exits with code 1 and pinpoints the exact sequence number."
 
-### Q5: "How do you ensure prompts and secrets from one test session do not leak into another?"
+### Q5: "How does KV-cache eviction protect against model side-channels?"
 **Honest Answer:**
-> "In Part 1, we implemented `backend/app/llm_isolation.py` with three automated checks:
-> 1. `ISO-09` (Session Context Guard): Verifies that each test session constructs a fresh, stateless message history with zero prompt residue from prior sessions.
-> 2. `ISO-10` (Session Canary Probe): Injects an ephemeral random token into Session A's context and asserts 0% presence in Session B's inputs and outputs.
-> 3. `ISO-11` (Output Isolation Scanner): Scans generated outputs to confirm no Blue defense rules or cross-attack strings leak.
+> "In `backend/app/providers.py`, we inject `keep_alive: 0` into Ollama completion payloads, forcing the inference daemon to immediately evict the model and KV-cache from GPU/VRAM after responding.
 > 
-> We explicitly disclaim in our report that shared multi-tenant GPU KV caches (e.g., in hosted providers) are outside container boundary control, which is why stateless per-request invocation is strictly enforced."
+> In addition, the Target agent holds zero outbound signing credentials and is architecturally incapable of forging requests to peer roles. Cross-session canary checks (`ISO-10`) and output scanning (`ISO-11`) verify that prior session strings never leak into subsequent sessions."
+
+### Q6: "Why use deterministic simulations alongside live LLM providers?"
+**Honest Answer:**
+> "Reproducibility and regression testing. In safety infrastructure, tests must be 100% deterministic so you know that an isolation breach or canary leak is caused by an architectural regression, not LLM stochastic noise.
+> 
+> However, Bayora fully supports live LLMs: we include providers for local Ollama and hosted Groq API models. When live mode is active, the UI clearly displays transparency notices and enforces KV-cache eviction."
+

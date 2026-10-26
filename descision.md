@@ -1238,3 +1238,25 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Validated that all required threat topics are present in documentation and served by the API.
 - Verification: 3 tests in `backend/tests/test_threat_model.py` passed, full test suite clean, frontend builds cleanly.
 
+## 2026-10-26 — Demo Script and Presentation Polish for No-Docker Architecture (Phase 10)
+- Status: Active
+- Decision: Update `docs/DEMO_SCRIPT.md` with an explicit 3-minute judge presentation script and Top 6 Q&As centered on non-container process isolation, OS sandboxing, loopback packet control, and offline audit verification. Update `README.md` with execution instructions for offline audit verification (`scripts/verify_audit.py`), host firewalls, and service accounts.
+- Reason: Clear, concise presentation guidance ensures the engineering team demonstrates the exact judging objectives (isolation without Docker, side-channel mitigation, and audit integrity) within strict hackathon judging time constraints.
+- Approach chosen:
+  - **3-Minute Presentation Script (`docs/DEMO_SCRIPT.md`)**:
+    - [0:00–0:45] The Problem & The Architecture (Track 4 focus, 6 independent processes on 127.0.0.1:8000..8004, .run/<role> 0700/0600 permissions, OS sandboxing).
+    - [0:45–1:30] Execution, Evaluation & Zero-Knowledge Defense (target holds zero signing keys, Blue sees redacted failure codes, instruction-guard defense).
+    - [1:30–2:15] Continuous Monitoring & Cryptographic Witness Verification (live violation alert, PROCESS_CRASH audit alert, SHA-256 chain, witness verification).
+    - [2:15–3:00] Offline Verification, Isolation Probes & Honest Threat Model (ISO-06 empirical barriers, ISO-07 sandbox strength, standalone offline verifier, 14-threat matrix).
+  - **Top 6 Judge Q&As (`docs/DEMO_SCRIPT.md`)**:
+    - Q1: Real isolation without Docker or virtualization.
+    - Q2: Cross-role filesystem and memory protection.
+    - Q3: Cross-role loopback connection barriers.
+    - Q4: Standalone offline audit verifier proofs.
+    - Q5: KV-cache eviction and model side-channels.
+    - Q6: Deterministic simulation alongside live LLM providers.
+  - **Documentation & Instructions (`README.md`)**:
+    - Documented `scripts/verify_audit.py` offline verification CLI and evidence export.
+    - Documented host firewall scripts (`setup_firewall.sh`, `setup_firewall.ps1`) and dedicated service account scripts (`setup_users.sh`, `setup_users.ps1`).
+- Verification: Validated markdown syntax, links, and command examples across `docs/DEMO_SCRIPT.md` and `README.md`.
+

@@ -115,6 +115,25 @@ When Docker is unavailable, Bayora runs with **real OS process isolation** acros
 bash scripts/run_local.sh
 ```
 
+### Standalone Offline Audit Verification & Export:
+Audit records can be independently verified without running the FastAPI server:
+```bash
+python scripts/verify_audit.py --db backend/bayora.db --export evidence_bundle.json
+```
+Options:
+- `--db <path>`: Path to SQLite database (default: `backend/bayora.db`).
+- `--witness-log <path>`: Cross-check against external witness `checkpoints.jsonl`.
+- `--export <path>`: Export full cryptographic evidence bundle as portable JSON.
+- Exits with return code 0 on verified integrity; exits with return code 1 on tamper detection.
+
+### Optional Host OS Hardening Scripts:
+- **Host Firewall (Loopback Packet Isolation):**
+  - Linux iptables: `bash scripts/setup_firewall.sh`
+  - Windows NetFirewall: `powershell -ExecutionPolicy Bypass -File scripts\setup_firewall.ps1`
+- **Dedicated Unprivileged Service Accounts:**
+  - Linux: `bash scripts/setup_users.sh`
+  - Windows: `powershell -ExecutionPolicy Bypass -File scripts\setup_users.ps1`
+
 ## Run with Docker (isolated roles)
 
 Needs Docker with Compose v2 (tested on Docker Desktop 28.3.3, macOS arm64).
