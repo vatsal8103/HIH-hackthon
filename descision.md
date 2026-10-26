@@ -1187,3 +1187,24 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: Without root cgroups or Job Objects, resource limits on host processes are advisory rather than hard limits; this constraint is explicitly documented and reported in ISO-12.
 - Verification: 12 unit tests in `backend/tests/test_fairness.py` passed, full test suite passes, `ruff check` and `ruff format` clean.
 
+## 2026-10-26 — Standalone Offline Audit Verifier & Evidence Bundle Export (Phase 7)
+- Status: Active
+- Decision: Provide a standalone offline CLI tool (`scripts/verify_audit.py`) that opens the SQLite database in URI read-only mode, independently validates the cryptographic SHA-256 hash chain, checks evidence digests against attempt records, verifies external witness checkpoint alignment, and exports an evidence bundle JSON without running the FastAPI application.
+- Reason: Audit integrity must be verifiable by outside auditors or judges who cannot trust a running application server to report on its own integrity. An independent, zero-dependency offline verifier guarantees empirical proof of tamper detection.
+- Approach chosen:
+  - **Standalone Verifier Script (`scripts/verify_audit.py`)**:
+    - Opens database file with `sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)` preventing any accidental database writes.
+    - Validates genesis hash (`GENESIS = "0" * 64`), strict sequence increments, and per-event canonical SHA-256 hash links across `HASHED_FIELDS`.
+    - Verifies attempt evidence references (`attempt:<id>`) against stored prompt, response, and verdict digests.
+    - Optional `--witness-log <path>` compares local chain head hashes against external witness checkpoint records.
+    - Optional `--export <path>` exports a standardized `bayora-audit-evidence-bundle-v1` JSON structure with full events and referenced attempt/defense records.
+    - Returns exit code 0 on verified integrity, exit code 1 on tamper detection or missing records.
+  - **Automated Tamper Detection Tests (`backend/tests/test_verify_audit.py`)**:
+    - Tested valid session run verification and evidence bundle export.
+    - Tested tampering with event details (catches hash mismatch).
+    - Tested deleting an event (catches sequence break and broken prev_hash link).
+    - Tested tampering with attempt prompt in SQLite (catches prompt digest mismatch).
+    - Tested tampering with witness checkpoint head hash (catches witness divergence).
+- Trade-offs: The standalone script uses Python standard library only (`sqlite3`, `hashlib`, `json`, `argparse`, `pathlib`) for maximum portability across any auditor machine.
+- Verification: 5 unit and negative tamper tests in `backend/tests/test_verify_audit.py` passed, `ruff check` and `ruff format` clean.
+

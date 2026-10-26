@@ -469,6 +469,12 @@ The agents' probe results are self-reported by Bayora's own code. Independent pr
    It returns `status`, `checkpoints`, `anchored_seq` (the head in force), `head_seq`, `unanchored_events` and `superseded`. A mismatch, or an unreachable configured witness, sets `ok = false`.
 4. **Tamper simulation** (`POST /api/audit/tamper-test`): mutates an in-memory copy. With a witness configured, `checkpoint.compare(tampered_chain, records)` is attached as `checkpoint.detected`. An unreachable or malformed witness → 502.
 5. **Malformed witness replies:** `publish` accepts only a record with an integer `seq`, string `head_hash` and integer `index`; anything else → `failed`. `fetch()` accepts only `{records: [records], integrity: {ok: bool}}`; anything else raises `RemoteError`, so verify reports `unavailable` and `ok: false`, and the report records `unavailable`. No committed request returns 500 because of the witness.
+6. **Standalone offline verification & evidence export** (`scripts/verify_audit.py`):
+   - Opens the SQLite database in URI read-only mode (`mode=ro`) without running the backend server.
+   - Recomputes SHA-256 over canonical JSON across `HASHED_FIELDS` for all rows, verifying sequence monotonicity, hash link continuity, and genesis anchoring.
+   - Cross-checks evidence digests against raw `attempts` rows (prompts, responses, verdicts).
+   - Validates alignment against external witness checkpoint logs (`--witness-log`).
+   - Exports portable, self-contained JSON evidence bundles (`--export evidence_bundle.json`) for outside auditors.
 
 ### 5.3 Crash and recovery
 
