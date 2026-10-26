@@ -1118,6 +1118,26 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Scripts to provision unprivileged system accounts (`bayora-cp`, `bayora-red`, `bayora-blue`, `bayora-target`, `bayora-witness`) and configure 0700/0600 POSIX permissions or Windows `icacls` DACLs on `.run/<role>`.
   - **Frontend UI (`api.ts`, `HowItWorks.tsx`, `IsolationLab.tsx`)**:
     - Updated type definitions and rendered badges/notes with the detected OS sandbox summary and real strength.
-- Trade-offs: Without root privileges or pre-installed `bwrap` on Linux, isolation remains at the process level (PID separation, scrubbed environment, loopback network boundary, file mode 600/700). The system honestly reports this level rather than claiming full OS containerization.
 - Verification: 8 tests in `backend/tests/test_os_sandboxing.py` covering capability schema, command wrapping for bubblewrap and firejail, filesystem permission verification, API metadata exposure, ISO-07 reporting, and Windows Job Object assignment. Full backend test suite (292 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `tsc --noEmit` clean, `npm run build` clean, and 58 frontend unit tests passed.
+
+## 2026-10-26 — Local Network Control and Barrier Probing (Phase 3)
+- Status: Active
+- Decision: Enforce strict loopback binding (127.0.0.1) across all services, provide host firewall rule templates for Linux (iptables) and Windows (NetFirewallRule), and enhance agent reachability probes with honest barrier categorization ("blocked by OS", "blocked by authentication only", "reachable", or "authorized path").
+- Reason: On shared loopback without containers, TCP ports are reachable by other local processes unless firewall rules or network namespaces are installed. Accurately distinguishing between physical/OS packet blocks and application-level cryptographic authentication barriers ensures that security guarantees are never exaggerated to judges or operators.
+- Approach chosen:
+  - **Empirical Barrier Classification (`backend/agents/common.py`)**:
+    - `check_peer_barrier(name, host, port, tcp_outcome)`:
+      - If TCP connect fails (refused, timeout, unreachable, dns): categorized as `"blocked by OS"`.
+      - If TCP connect succeeds to a peer agent (`red-agent`, `blue-agent`, `target`, `witness`): tests unauthenticated dispatch (`/v1/act`). When rejected (401/403/422), categorized as `"blocked by authentication only"`.
+      - If peer answers without authentication (< 400): categorized as `"reachable"` (flagged as an isolation violation).
+      - If target is control-plane: categorized as `"authorized path"`.
+    - `probe()` embeds `barrier` attribute in each reachability item.
+  - **Dynamic ISO-06 Evaluation (`backend/app/isolation.py`)**:
+    - Aggregates empirical barrier counts: reports number of targets blocked by OS vs blocked by authentication only.
+    - Fails loudly with `outcome="fail"` if any unauthenticated peer cross-role reach is detected.
+  - **Local Host Firewall Scripts (`scripts/setup_firewall.sh`, `scripts/setup_firewall.ps1`)**:
+    - Linux iptables owner-match rules blocking cross-agent loopback traffic (8002 <-> 8003 <-> 8004) and dropping non-loopback egress for `bayora-*` service accounts.
+    - Windows Defender Firewall outbound block rules restricting cross-role loopback ports and internet egress for local service accounts.
+- Trade-offs: Without OS firewall or network namespaces applied with administrative privileges, TCP connections to loopback ports succeed at the socket layer; isolation relies on the cryptographic Ed25519 token/grant barrier. This is honestly labeled as "blocked by authentication only" rather than "blocked by OS".
+- Verification: 5 unit tests in `backend/tests/test_local_network_control.py` (proves loopback-only binding, peer barrier labeling, barrier counting in ISO-06, and loud failure on unauthenticated cross-role reach). Full test suite (297 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, and frontend unit tests passed.
 

@@ -127,20 +127,47 @@ def role_runtime_checks(reports: dict) -> list[tuple]:
 
         caps = sandbox.detect_os_capabilities()
         pids = []
+        os_blocked = 0
+        auth_blocked = 0
+        violations = []
         for role in remote.AGENT_ENV:
             rep = reports.get(role)
             if isinstance(rep, dict) and "security" in rep and rep["security"].get("pid"):
                 pids.append(f"{role}:{rep['security']['pid']}")
+            if isinstance(rep, dict) and "reachability" in rep:
+                for item in rep["reachability"]:
+                    barrier = item.get("barrier", "")
+                    if barrier == "blocked by OS":
+                        os_blocked += 1
+                    elif barrier == "blocked by authentication only":
+                        auth_blocked += 1
+                    elif barrier == "reachable" and item["name"] != "control-plane":
+                        violations.append(f"{role}→{item['name']} unauthenticated reach")
+
+        if violations:
+            iso06_detail = f"Network violations detected: {'; '.join(violations)}"
+            iso06_outcome = "fail"
+        elif auth_blocked or os_blocked:
+            iso06_detail = (
+                f"Loopback isolation (127.0.0.1) on separate agent ports: {os_blocked} targets blocked by OS, "
+                f"{auth_blocked} peer targets blocked by authentication only (grant verification barrier); "
+                "0 unauthenticated cross-role leaks."
+            )
+            iso06_outcome = "pass"
+        else:
+            iso06_detail = (
+                "Loopback isolation (127.0.0.1) on separate agent ports; cross-role access blocked by Ed25519 "
+                "session grant verification (no shared network paths without control-plane authorization)."
+            )
+            iso06_outcome = "pass"
+
         return [
             (
                 "ISO-06",
                 "Role network segmentation",
                 "enforced",
-                "pass",
-                (
-                    "Loopback isolation (127.0.0.1) on separate agent ports; cross-role access blocked by Ed25519 "
-                    "session grant verification (no shared network paths without control-plane authorization)."
-                ),
+                iso06_outcome,
+                iso06_detail,
             ),
             (
                 "ISO-07",

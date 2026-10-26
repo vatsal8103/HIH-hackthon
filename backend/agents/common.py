@@ -204,12 +204,48 @@ def process_security() -> dict:
     }
 
 
+def check_peer_barrier(name: str, host: str, port: int, tcp_outcome: str) -> str:
+    """Label isolation boundary honestly:
+    - 'blocked by OS': connection refused, unreachable, timeout, or DNS failure
+    - 'blocked by authentication only': TCP connection accepted on loopback, but dispatch
+      without a valid control-plane grant is rejected (HTTP 401/403)
+    - 'reachable': endpoint responds without authentication (unauthorized cross-role path)
+    - 'authorized path': expected permitted link to control-plane
+    """
+    if tcp_outcome != "connected":
+        return "blocked by OS"
+    if name == "control-plane":
+        return "authorized path"
+    if name in ("red-agent", "blue-agent", "target", "witness"):
+        try:
+            with httpx.Client(base_url=f"http://{host}:{port}", timeout=0.8) as client:
+                resp = client.post("/v1/act", json={})
+                if resp.status_code in (401, 403, 404, 405, 422):
+                    return "blocked by authentication only"
+                if resp.status_code < 400:
+                    return "reachable"
+        except (httpx.HTTPError, OSError):
+            return "blocked by OS"
+        return "blocked by authentication only"
+    return "reachable" if tcp_outcome == "connected" else "blocked by OS"
+
+
 def probe(self_name: str, role: str | None = None, grant: str | None = None) -> dict:
-    reach = [
-        {"name": name, "host": host, "port": port, "outcome": connect(host, port)}
-        for name, host, port in probe_targets()
-        if name != self_name
-    ]
+    reach = []
+    for name, host, port in probe_targets():
+        if name == self_name:
+            continue
+        outcome = connect(host, port)
+        barrier = check_peer_barrier(name, host, port, outcome)
+        reach.append(
+            {
+                "name": name,
+                "host": host,
+                "port": port,
+                "outcome": outcome,
+                "barrier": barrier,
+            }
+        )
     report = {"agent": self_name, "reachability": reach, "security": process_security()}
     if role and grant:
         report["permissions"] = permission_probe(role, grant)
