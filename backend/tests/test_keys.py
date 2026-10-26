@@ -1,4 +1,5 @@
 import hashlib
+import os
 import stat
 
 import pytest
@@ -21,7 +22,8 @@ def test_fill_missing_keeps_existing_values_and_adds_the_rest(tmp_path, monkeypa
         kid, private = tokens.private_key("SIGNING")
         assert tokens.verify(tokens.sign({"x": 1}, kid, private), tokens.public_keys("PUBLIC"))["x"] == 1
     assert env.read_text().startswith("# comment\n")
-    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(env.stat().st_mode) == 0o600
     assert keys.fill_missing(env) == []  # second run changes nothing
 
 

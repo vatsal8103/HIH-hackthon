@@ -29,7 +29,10 @@ tamper-proof storage: anyone with write access to the witness volume can still a
 and such changes are detected only if they break the record chain.
 """
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows non-POSIX fallback
+    fcntl = None
 import hashlib
 import hmac
 import json
@@ -159,11 +162,13 @@ def locked():
     path = log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def append(fields: dict) -> dict:

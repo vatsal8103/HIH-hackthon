@@ -546,6 +546,7 @@ def _disclaimer(agents: dict, kind: str | None, provider: str | None = None) -> 
         )
         if (provider or "").startswith("groq/"):
             target += " The prompts and the synthetic scenario were sent to Groq, a third-party service."
+        target += " The provider's internal KV-cache is outside our control; mitigations include stateless per-request context."
     else:
         target = f"Target provider kind: {kind}."
     if all(agents.values()):

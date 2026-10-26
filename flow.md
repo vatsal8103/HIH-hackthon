@@ -147,11 +147,10 @@ Residual: a compromised Red agent that submits an attack outside the session's l
 | respond | `_respond`: `defenses.run_target(prompt, rules, model)`, where `model` calls `provider.respond_with_metadata` | Same guardrails in the control plane; `model` = `call_agent("target", "/v1/respond", {prompt})`, which returns `{response, provider, kind, metadata}`. A reply without a string `response` → `RemoteError`; `metadata` is re-filtered by `providers.safe_metadata` | `target.baseline_response` (response SHA-256, guard fields, `provider`, `provider_kind`, `target_runtime`, and since 2026-10-26 `provider_metadata` {finish_reason, token counts} when the provider reported any; reset per prompt, absent for the simulator and blocked prompts) |
 | evaluate | `_evaluate` (always in the control plane): `evaluator.evaluate(response, attack.criteria, attack.task)`. Since 2026-10-26 checks normalise text, match known values in alternate forms and bounded Base64, recognise common refusal openers, and use `task` signals for over-refusal (II-04) | Same | `evaluator.baseline_verdict` |
 | defend | `blue_findings()` → `PLAYBOOK` → `apply_defense` | `call_agent("blue", "/v1/act", {session_id})`. The Blue agent GETs `/api/blue/sessions/{id}/findings` and POSTs `/defenses` per criterion in its own `PLAYBOOK` | `blue.findings_read` (in-process: stage; agent: Blue API route, `via: api`), `blue.defense_applied` per rule |
-| retest | `submit_attempt(retest)` per case, then respond and evaluate | Red agent `/v1/act` with `phase: retest` (the Red API allows retest only while the stage is `defend`), `_require_submitted`, then respond (target agent) and evaluate | `red.retest_submitted`, `target.retest_response`, `evaluator.retest_verdict` |
-| isolation | `isolation.run_checks` (§3) | Same, plus agent probes | `isolation.check` ×8 |
+| isolation | `isolation.run_checks` (§3) | Same, plus agent probes and LLM isolation checks | `isolation.check` ×11, `isolation.llm_check` |
 | report | `stage_report`: residual risk per case, counts, isolation summary (`enforced`, `network`, `configured`, `simulated`, `planned`), `audit.verify` plus `checkpoint.verify` (both taken *before* the report event), `deployment` (role modes and the provider recorded on the latest target event), disclaimer chosen by mode | Same | `report.generated` |
 
-A full seven-case run appends **56 events**; ISO-05 sees 47 of them. Both were measured in-process and in a Docker agent-mode run, which records exactly one `blue.findings_read`, the Blue agent's. Before the security review it was 57, because ISO-02 itself read through the Blue API (finding V3).
+A full seven-case run appends **60 events** (including the three LLM isolation checks: ISO-09, ISO-10, ISO-11 and diagnostic event `isolation.llm_check`); ISO-05 sees 47 of them.
 
 In agent mode every dispatch goes through `pipeline.dispatch(role, path, session_id, actions, payload)`, which adds a fresh control-plane grant (§2.6). Red and Blue role actions carry the role-signed token into the audit event details as `credential`.
 
@@ -342,7 +341,12 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
    - If all three agents are configured: for each role, `call_agent(role, "/v1/probe", {})`. The agent probes its fixed `PROBE_TARGETS` (compose service names plus TEST-NET-1 `192.0.2.1`) with a 1.5 s TCP connect, and reads `/proc/self/status` (uid, CapEff, NoNewPrivs), a write probe on `/`, and whether `/var/run/docker.sock` exists.
    - `evaluate_probe` compares reachability with `NETWORK_POLICY` (each role → `control-plane` only; "refused" counts as reachable) → ISO-06 `network`. `ollama-proxy` is in every agent's probe list: Red and Blue reaching it is a violation; for the target it is an optional path (`OPTIONAL_PATHS`), present only in Live AI mode. `evaluate_security` → ISO-07 `configured`. An agent that doesn't answer fails both checks: fail closed.
 6. **`checkpoint_check()`** → ISO-08: `enforced` when a witness is configured (`checkpoint.verify`), else `planned`.
-7. Inserts 8 rows and appends `isolation.check` ×8. All probes run before any local write in this stage.
+7. **`llm_isolation.run_llm_checks()`:**
+   - **ISO-09 (enforced):** LLM cross-session context guard. Confirms fresh message history per session and ensures no earlier session's text or private artifacts are sent in later requests.
+   - **ISO-10 (enforced):** LLM cross-session canary isolation. Plants a unique random canary string in session A's scenario context and asserts zero residue in session B's output.
+   - **ISO-11 (enforced):** LLM output isolation & KV-cache protection. Scans target responses to ensure no Blue defense rules or cross-attack prompt fragments appear; verifies per-request stateless invocation and records that shared model servers' internal KV caches are outside local container control.
+   - Records diagnostic event `isolation.llm_check` to the audit chain.
+8. Inserts 11 rows and appends `isolation.check` ×11. All probes run before any local write in this stage.
 
 **Isolation lab page:** `POST /api/isolation/matrix` runs the same 40 probes on demand.
 

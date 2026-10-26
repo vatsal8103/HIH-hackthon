@@ -979,3 +979,16 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - **Decision:** report II-04 as inconclusive for injection resistance on this target configuration instead of changing the target. Explanations now say that an over-refusal or an unfinished task is not evidence that an attack succeeded *or* that it was resisted (outcome sentences, outcome definitions and finding impact in `explain.ts`); the README limitations and the audit report state the model-specific finding, that fence effectiveness is unverified on this model (shown only on the simulator), and that the result does not generalise to other models, settings or notes.
 - **Not changed:** system prompt, evaluator logic and criteria, fence, provider settings, attack execution, pipeline, stored runs, audit events, witness. The uncommitted II-04 task-wording change from earlier today is left as it was.
 - **Rejected for now:** widening the system prompt's scope (changes live behaviour and comparability; needs its own review and a new clean baseline).
+
+## 2026-10-26 — LLM isolation: cross-session contamination guard, canary test, and KV-cache mitigations
+- Status: Active
+- Decision: Add `backend/app/llm_isolation.py` and integrate three new enforced checks into `app/isolation.py`:
+  - `ISO-09`: LLM cross-session context guard (verifies fresh per-session message histories, ensuring no prior session text leaks into later requests).
+  - `ISO-10`: LLM cross-session canary test (plants a unique random canary in session A's scenario context and asserts zero residue in session B).
+  - `ISO-11`: LLM output isolation & KV-cache protection (scans target answers to ensure no Blue defense rules or cross-attack prompt fragments appear; documents that shared model servers' internal KV caches are outside local container control and enforces per-request stateless invocation).
+- Reason (Stated by user): Prove that one test session cannot leak into another through the model or KV cache; record detailed diagnostics to the audit chain.
+- Approach chosen:
+  - Preserved existing container controls (`ISO-07`) and witness checkpoint (`ISO-08`) to avoid breaking existing agent and docker compose test assertions.
+  - Added negative tests in `tests/test_llm_isolation.py` verifying that deliberate cross-session leaks and deliberate canary leaks fail visibly.
+  - Recorded report disclaimer for live models that the provider's internal KV-cache is outside local control.
+- Verification: 256 backend tests passing (`python -m uv run pytest`), `ruff check` clean, and all 57 frontend unit tests passing (`npm test`).
