@@ -9,7 +9,7 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 
 | Layer | Entry | Responsibility |
 |---|---|---|
-| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential. Hash routes: overview, `how`, `demo`, `runs`, `attacks`, `isolation`, `audit`, `reports` |
+| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential. Hash routes: overview, `how`, `demo`, `runs`, `attacks`, `isolation`, `audit`, `reports`, `monitoring` |
 | Plain language | `src/explain.ts` (pure, unit-tested by `src/explain.test.ts`), `src/components/Explain.tsx` | Turns recorded run data into plain outcome labels, stage states and results, risk and checkpoint wording, and the target notice. Never adds facts the data lacks |
 | Edge relay | Docker only: `frontend/relay.conf` (nginx stream, Dockerfile target `relay`) | Holds the published loopback port and forwards raw TCP to `frontend:8080` over `ui_net`. Holds no credential and parses no HTTP |
 | Edge proxy | Docker: `frontend/nginx.conf.template` (nginx-unprivileged, target `app`, internal networks only). Dev: `frontend/vite.config.ts` proxy | Answers only `Host` 127.0.0.1 or localhost (nginx 421 otherwise; Vite 403). Injects the operator token server-side, replacing any client `Authorization` header. Refuses `/api/(red\|blue\|target)/` (nginx 403, Vite 404). nginx adds anti-framing, `nosniff` and `no-referrer` headers |
@@ -22,7 +22,8 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 | Remote | `backend/app/remote.py` | Outbound HTTP to agents and the witness. Failures raise `RemoteError`, never fall back |
 | Role agents | `backend/agents/{red,blue,target}_agent.py`, `common.py` | Docker only. Each accepts a dispatch only with a valid control-plane grant, and Red/Blue sign every API request with their own key. The target holds no API credential |
 | Simulation | `attacks.py`, `target.py`, `providers.py`, `defenses.py`, `evaluator.py` | Test cases, the target behind a provider interface (deterministic simulator by default, optional live Ollama model, §2.9), guardrails, criteria |
-| Isolation | `backend/app/isolation.py` | Permission probes, data checks, and network and container checks reported by the agents |
+| Isolation | `backend/app/isolation.py`, `backend/app/llm_isolation.py` | Permission probes, data checks, LLM cross-session context/canary guards, and network and container checks reported by the agents |
+| Monitoring | `backend/app/monitor.py` | Real-time security alerts (coarse reasons, strictly redacted), sliding-window rate limiting, role burst tracking, audit-chain event logging |
 | Audit | `backend/app/audit.py` | Hash-chain append, verification, tamper simulation |
 | Checkpoint | `backend/app/checkpoint.py` → `backend/witness/app.py`, `backend/witness/recover.py` | Publishes the chain head with an extension proof after commits; verifies the chain against the witness log. Operator recovery appends `supersede` records |
 | Storage | `backend/app/db.py` | SQLite (default) or PostgreSQL (`DATABASE_URL`) |
@@ -416,6 +417,37 @@ The agents' probe results are self-reported by Bayora's own code. Independent pr
 | Witness head conflicts with the local chain, or a far-future record exists (legacy, or written to the volume) | Publish returns `rejected` and posts nothing; verify fails | Operator: `docker compose exec witness .venv/bin/python -m witness.recover status`, then `supersede --from-index N --expect-head-seq S --reason "…"`. Publishing resumes from the last checkpoint still in force. The superseded records stay; verify still fails, with kind `superseded` and the reason | `tests/test_witness_recovery.py`, compose `test_witness_recovery_…` |
 
 What it detects: edits, deletions, reordering and truncation anywhere up to the latest checkpoint, including a full rewrite with recomputed hashes made with the database owner's credentials (tested in Docker from a one-off `migrate` container; the backend's own role is refused). What it does not detect: changes confined to events after the latest checkpoint (normally at most one stage), or truncation of the witness log's own tail.
+
+### 5.4 Continuous monitoring and anomaly detection
+
+```mermaid
+flowchart TD
+    Req[Incoming HTTP Request] --> Auth[auth.require / auth._signed]
+    Auth -- 403 Forbidden --> Alert[monitor.record_alert]
+    Auth -- 401 Signature Fail / Replay / Expiry --> Alert
+    Auth -- Cross-Boundary Role Access --> Alert
+    Auth -- Role Burst >30 req/5s --> Alert
+    Alert --> DB[(alerts table: id, ts, role, route, coarse reason, status)]
+    Alert --> Audit[audit.append: monitor.alert]
+    Operator[Operator UI #/monitoring] -- GET /api/alerts: rate limited 60/min --> API[main.py: get_alerts]
+    API --> AlertView[Redacted Alert Log: Zero prompts / Zero defense rules]
+```
+
+1. **Trigger Points:**
+   - Permission verification in `auth.require()` triggers `FORBIDDEN_ROUTE` on 403.
+   - Cross-boundary detection in `auth.require()` triggers `CROSS_BOUNDARY_ACCESS` when Red accesses `/api/blue/` or Blue accesses `/api/red/`.
+   - Signed token verification in `auth._signed()` triggers `INVALID_SIGNATURE`, `TOKEN_REPLAYED`, or `TOKEN_EXPIRED`.
+   - Request burst tracking in `monitor.record_role_request()` triggers `RATE_EXCEEDED` if a single role exceeds 30 requests in 5 seconds.
+   - Interactive verification via `POST /api/alerts/demo` triggers `DEMO_VIOLATION` for live demonstrations.
+2. **Strict Redaction Guarantee:**
+   - Stored alert schema records only `id`, `ts`, `role`, `route`, `reason`, and coarse metadata (`status_code`, `method`, `via`).
+   - Attack prompts, payload arguments, defense rules, and bearer tokens are never captured or recorded in alert data.
+3. **Audit Trail Recording:**
+   - Every recorded alert issues an append-only event `monitor.alert` to `audit.py`.
+4. **Anti-Flooding Rate Limiting:**
+   - `GET /api/alerts` enforces an in-memory sliding window rate limiter (max 60 requests/minute per client IP).
+5. **Operator Dashboard:**
+   - Frontend `Monitoring.tsx` renders violation cards by role and a live log table with coarse reason badges.
 
 ## 6. Error handling summary
 | Where | Behaviour |

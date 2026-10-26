@@ -992,3 +992,16 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
   - Added negative tests in `tests/test_llm_isolation.py` verifying that deliberate cross-session leaks and deliberate canary leaks fail visibly.
   - Recorded report disclaimer for live models that the provider's internal KV-cache is outside local control.
 - Verification: 256 backend tests passing (`python -m uv run pytest`), `ruff check` clean, and all 57 frontend unit tests passing (`npm test`).
+
+## 2026-10-26 — Live monitoring and anomaly detection (Part 2)
+- Status: Active
+- Decision: Add `backend/app/monitor.py`, wire security alert hooks into `backend/app/auth.py`, expose operator-only alert query routes (`GET /api/alerts`, `POST /api/alerts/demo`) in `backend/app/main.py`, and build a dedicated `frontend/src/pages/Monitoring.tsx` UI view.
+- Reason (Stated by user): Provide real-time operational security awareness and anomaly detection across agent interactions while strictly upholding zero-knowledge data redaction boundaries.
+- Approach chosen:
+  - **Strict Redaction Guarantee**: Alert logs store only role, route, coarse reason code (`FORBIDDEN_ROUTE`, `CROSS_BOUNDARY_ACCESS`, `INVALID_SIGNATURE`, `TOKEN_REPLAYED`, `TOKEN_EXPIRED`, `RATE_EXCEEDED`, `DEMO_VIOLATION`), and non-sensitive metadata (`status_code`, `method`, `via`). Prompt contents, defense rules, and tokens are never stored in alert logs.
+  - **Audit Trail Integration**: Every security alert logs an immutable event (`monitor.alert`) to the SHA-256 hash chain.
+  - **Anti-Flooding Rate Limiting**: Implemented a thread-safe sliding window rate limiter (60 requests per minute) on `GET /api/alerts` to prevent denial-of-service or query flooding.
+  - **Anomaly Detection**: Added tracking of request bursts per role (>30 requests within 5 seconds triggers an anomaly alert).
+  - **Operator UI**: Created `#/monitoring` in the frontend with role breakdown cards, a live alerts table with color-coded severity badges, and a "Trigger demo violation" action for live judge demonstrations.
+- Trade-offs: Alert detail is intentionally coarse to eliminate any risk of prompt leakage to unauthorized observers.
+- Verification: 5 new unit tests in `backend/tests/test_monitor.py` (forbidden call detection, zero secret text, audit chain recording, operator-only access, rate limiting). Full backend suite (261 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, and 57 frontend unit tests passed.

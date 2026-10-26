@@ -19,6 +19,7 @@ from app import (
     defenses,
     evaluator,
     isolation,
+    monitor,
     pipeline,
     providers,
     remote,
@@ -588,3 +589,24 @@ def target_inbox(session_id: str, _role: str = Depends(require("target:read"))):
     with db.connect() as conn:
         _session(conn, session_id)
         return pipeline.target_inbox(conn, session_id)
+
+
+# ------------------------------------------------------------------ monitoring & alerts
+
+
+@app.get("/api/alerts")
+def get_alerts(
+    limit: int = Query(default=100, ge=1, le=500),
+    _principal: Principal = Depends(require("audit:read")),
+):
+    """Retrieve recent redacted alerts and per-role counts (operator only, rate limited)."""
+    monitor.check_alerts_rate_limit()
+    with db.connect() as conn:
+        return monitor.list_alerts(conn, limit)
+
+
+@app.post("/api/alerts/demo", status_code=201)
+def trigger_demo_alert(_principal: Principal = Depends(require("audit:read"))):
+    """Trigger a safe demonstration violation to verify live alerting."""
+    with db.connect() as conn:
+        return monitor.trigger_demo_violation(conn)

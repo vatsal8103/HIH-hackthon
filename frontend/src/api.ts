@@ -178,6 +178,25 @@ export interface CheckpointPublish {
   error?: string;
 }
 
+export interface Alert {
+  id: string;
+  created_at: string;
+  role: string;
+  route: string;
+  reason_code: string;
+  description: string;
+}
+
+export interface AlertsResponse {
+  alerts: Alert[];
+  counts: {
+    total: number;
+    by_role: Record<string, number>;
+    by_reason: Record<string, number>;
+  };
+  reason_codes: Record<string, string>;
+}
+
 export interface Verification {
   ok: boolean;
   checked: number;
@@ -315,4 +334,8 @@ export const api = {
   tamper: (mode: TamperMode, seq?: number) =>
     checked<TamperResult>(post("/api/audit/tamper-test", { mode, seq }), isRecord("verification", "summary"), "simulation result"),
   probeMatrix: () => checked<ProbeRow[]>(post("/api/isolation/matrix"), isList, "probe matrix"),
+  alerts: (limit = 100) =>
+    checked<AlertsResponse>(request(`/api/alerts?limit=${limit}`), isRecord("alerts", "counts"), "alerts response"),
+  triggerDemoAlert: () =>
+    checked<Alert>(post("/api/alerts/demo"), isRecord("id", "role", "route", "reason_code"), "demo alert result"),
 };
