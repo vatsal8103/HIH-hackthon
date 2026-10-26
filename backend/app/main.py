@@ -4,6 +4,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -372,6 +373,116 @@ def meta(_role: str = Depends(require("runs:read"))):
 @app.get("/api/attacks")
 def list_attacks(_role: str = Depends(require("attacks:read"))):
     return ALL_ATTACKS
+
+
+@app.get("/api/threat-model")
+def get_threat_model(_role: str = Depends(require("runs:read"))):
+    doc_path = Path(__file__).resolve().parents[2] / "docs" / "THREAT_MODEL.md"
+    content = doc_path.read_text(encoding="utf-8") if doc_path.exists() else ""
+    return {
+        "markdown": content,
+        "threats": [
+            {
+                "threat": "Red reads Blue defenses / Blue reads Red attacks",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Strict RBAC permissions (app/auth.py), signed Ed25519 role tokens, isolated Docker bridge networks (red-net, blue-net), control plane zero-knowledge redaction.",
+                "failure_mode": "Control plane kernel compromise or operator manually leaking logs.",
+                "test": "backend/tests/test_permissions.py::test_role_permissions",
+                "future": "Asymmetric envelope encryption of attack payloads and defense rules.",
+            },
+            {
+                "threat": "Target contamination across sessions",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Per-request stateless context construction (app/llm_isolation.py), strict session isolation guard (ISO-09), automated session canary probe (ISO-10).",
+                "failure_mode": "Underlying inference daemon retaining multi-turn memory or global conversation cache.",
+                "test": "backend/tests/test_llm_isolation.py::test_cross_session_context_guard_pass",
+                "future": "Per-session ephemeral container destruction and rebuild.",
+            },
+            {
+                "threat": "Audit log tampering (including DB owner rewrite)",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Cryptographic SHA-256 hash chaining of all events; independent witness checkpoint service on dedicated network (ISO-08); DB role bayora_app denied UPDATE/DELETE.",
+                "failure_mode": "Simultaneous compromise of both PostgreSQL database and witness log volume.",
+                "test": "backend/tests/test_checkpoint.py, backend/tests_compose/test_stack.py::test_full_chain_rewrite_detected",
+                "future": "Multi-witness Byzantine threshold consensus; public ledger transparency anchoring.",
+            },
+            {
+                "threat": "Container escape via shared kernel",
+                "protected": False,
+                "status": "Partial",
+                "how": "Hardened container profiles: cap_drop: ALL, no-new-privileges: true, non-root user (nobody), custom seccomp profile, read-only root filesystems (ISO-07).",
+                "failure_mode": "0-day host Linux kernel privilege escalation exploit (e.g. dirty COW, eBPF bug).",
+                "test": "backend/tests_compose/test_stack.py::test_container_capabilities_and_security_options",
+                "future": "Hardware virtualization microVM isolation (AWS Firecracker, gVisor runsc, Kata).",
+            },
+            {
+                "threat": "Timing & resource side channels",
+                "protected": False,
+                "status": "Partial",
+                "how": "Discrete response-time padding middleware (timing_mitigation_middleware, 10ms quantum, X-Timing-Protection: quantized); container CPU/memory bounds (ISO-12).",
+                "failure_mode": "Sub-millisecond CPU microarchitectural cache attacks (Flush+Reload, Prime+Probe), memory bus contention.",
+                "test": "backend/tests/test_fairness.py::test_timing_mitigation_middleware",
+                "future": "Physical CPU core pinning (cpuset) and constant-time queue processing.",
+            },
+            {
+                "threat": "Shared KV-cache leakage in model provider",
+                "protected": False,
+                "status": "Simulated",
+                "how": "Control plane enforces stateless single-turn calls with keep_alive: 0; output isolation scanner (ISO-11) flags prompt/defense residues; explicit UI report disclaimer.",
+                "failure_mode": "Multi-tenant inference server (vLLM, Ollama) sharing GPU prefix cache blocks across tenants.",
+                "test": "backend/tests/test_llm_isolation.py::test_output_isolation_scanner_clean",
+                "future": "Per-tenant GPU memory partitioning or confidential computing hardware enclaves.",
+            },
+            {
+                "threat": "Compromised signing key",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Asymmetric Ed25519 verification with Key IDs (kid); real-time key revocation endpoint (POST /api/credentials/revocations) rejects revoked credentials immediately.",
+                "failure_mode": "Stolen private key used prior to revocation notice being published to audit chain.",
+                "test": "backend/tests/test_credentials.py::test_revocation_lifecycle",
+                "future": "Ephemeral short-lived credentials (5-minute TTL) with hardware HSM storage.",
+            },
+            {
+                "threat": "Data leakage to third-party provider (Groq)",
+                "protected": False,
+                "status": "Partial",
+                "how": "Default mode uses 100% offline local simulator; live cloud models require opt-in and display explicit warnings; TLS 1.3 transit encryption.",
+                "failure_mode": "Third-party provider compromises, internal logging, or server-side model retention.",
+                "test": "backend/tests/test_providers.py",
+                "future": "Local-only offline weights (Llama 3 / Qwen) or differential privacy proxy.",
+            },
+            {
+                "threat": "Operator credential sharing",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Fine-grained RBAC permissions (PERMISSIONS); immutable audit log of operator commands; sliding-window rate limiting on alert queries (60 req/min).",
+                "failure_mode": "Multiple human operators sharing identical credentials prevents individual attribution.",
+                "test": "backend/tests/test_monitor.py::test_alerts_endpoint_rate_limited",
+                "future": "OIDC / SAML SSO with mandatory Multi-Factor Authentication (MFA) per operator.",
+            },
+            {
+                "threat": "Direct Prompt Injection bypass",
+                "protected": False,
+                "status": "Partial",
+                "how": "Multi-layer input defenses (instruction-guard, persona-lock, decode-scan) + output canary redaction (secret-egress-filter).",
+                "failure_mode": "Novel token encoding, unicode homoglyphs, or semantic payload splitting (PS-05).",
+                "test": "backend/tests/test_workflow.py",
+                "future": "Fine-tuned classifier guard models (Llama Guard / NeMo Guardrails).",
+            },
+            {
+                "threat": "Indirect Prompt Injection via data files",
+                "protected": False,
+                "status": "Partial",
+                "how": "Content fence stripping hidden markup (<!-- ... -->) before document content reaches target model.",
+                "failure_mode": "Multi-language hidden formatting, zero-width spaces, or Markdown image exfiltration.",
+                "test": "backend/tests/test_ii04_design.py",
+                "future": "Structural document parser with strict schema sanitization.",
+            },
+        ],
+    }
 
 
 @app.get("/api/runs")

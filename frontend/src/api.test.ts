@@ -51,3 +51,14 @@ test("an unreachable API reads as such", async () => {
   };
   await assert.rejects(api.meta(), (err: ApiError) => err.status === 0 && /Cannot reach/.test(err.message));
 });
+
+test("threatModel API validates well-formed and unexpected responses", async () => {
+  respond(200, { markdown: "# Threat Model", threats: [] });
+  const model = await api.threatModel();
+  assert.equal(model.markdown, "# Threat Model");
+  assert.deepEqual(model.threats, []);
+
+  respond(200, { invalid: true });
+  await assert.rejects(api.threatModel(), /unexpected threat model response/);
+});
+

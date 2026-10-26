@@ -1037,3 +1037,24 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Attack count readout and direct execution utilities for custom subsets.
 - Trade-offs: Simulator heuristics in `target.py` were broadened to recognize general instruction overrides and secret inquiries deterministically, ensuring imported benchmark tests produce clear evaluation verdicts.
 - Verification: 6 unit tests in `backend/tests/test_imported_attacks.py` (loading, attribute validation, JSON/CSV script import, custom run execution with imported attack IDs). Full backend suite (276 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 57 frontend unit tests passed.
+
+## 2026-10-26 — Threat model and residual-risk architecture matrix (Part 5)
+- Status: Active
+- Decision: Create `docs/THREAT_MODEL.md`, expose `GET /api/threat-model` in `backend/app/main.py`, and build the interactive Architecture Threat Model tab inside `frontend/src/pages/Reports.tsx`.
+- Reason (Stated by user): Clearly state what the architecture protects against, what it does not, when guarantees fail, and what to improve, linking every implemented item to the automated test that proves it.
+- Approach chosen:
+  - **Comprehensive Threat Matrix (`docs/THREAT_MODEL.md`)**:
+    - Modeled 11 key threats spanning system boundaries (Red/Blue segregation, cross-session contamination, audit log tampering, container escape, timing side channels, shared KV cache, compromised signing keys, external provider egress, operator credential sharing, prompt injection, and indirect injection).
+    - Structured columns: Threat, Protected?, Status (`Implemented`, `Partial`, `Simulated`, `Planned`), How it is protected, When it breaks (Failure mode), Verified Test, and Future Improvement.
+    - Honest boundaries: Marked shared kernel container escape as Partial (requires microVMs for native hostile payloads), microarchitectural timing side channels as Partial (requires physical CPU pinning), and shared KV cache as Simulated/Disclaimed (multi-tenant GPU memory is outside local container control).
+  - **Control Plane Endpoint (`GET /api/threat-model`)**:
+    - Serves both raw Markdown and structured JSON array for frontend rendering and automated unit testing.
+    - Protected by `runs:read` permission.
+  - **Interactive Threat Model UI (`Reports.tsx`)**:
+    - Added tabbed navigation between "Run Report Document" and "Architecture Threat Model".
+    - Interactive filter buttons by implementation status with count badges.
+    - Side-by-side callout cards: "Cryptographically Guaranteed" vs "Honest Engineering Limitations & Residual Risks".
+    - Expandable rows detailing future architectural improvements.
+    - Collapsible disclosure with raw `docs/THREAT_MODEL.md` specification.
+- Trade-offs: Exposed threat model data via a dedicated API endpoint rather than purely static client markdown to allow backend unit tests to enforce threat documentation completeness and status accuracy.
+- Verification: 3 unit tests in `backend/tests/test_threat_model.py` (document existence & coverage, API structure & status validation, operator permissions). Full backend suite (279 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 58 frontend unit tests passed.

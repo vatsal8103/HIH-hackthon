@@ -305,9 +305,26 @@ async function checked<T>(response: Promise<unknown>, valid: Check, what: string
   return value as T;
 }
 
+export interface ThreatItem {
+  threat: string;
+  protected: boolean;
+  status: "Implemented" | "Partial" | "Simulated / Disclaimed" | "Planned" | string;
+  how: string;
+  failure_mode: string;
+  test: string;
+  future: string;
+}
+
+export interface ThreatModelResponse {
+  markdown: string;
+  threats: ThreatItem[];
+}
+
 export const api = {
   meta: () => checked<Meta>(request("/api/meta"), isRecord("stages", "criteria", "rules", "controls", "deployment"), "metadata response"),
   attacks: () => checked<Attack[]>(request("/api/attacks"), isList, "attack list"),
+  threatModel: () =>
+    checked<ThreatModelResponse>(request("/api/threat-model"), isRecord("markdown", "threats"), "threat model response"),
   runs: () => checked<RunSummary[]>(request("/api/runs"), isList, "run list"),
   run: (id: string) => checked<RunDetail>(request(`/api/runs/${encodeURIComponent(id)}`), isRun, "run"),
   createRun: (attackIds?: string[]) =>

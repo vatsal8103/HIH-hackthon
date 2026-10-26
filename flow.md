@@ -283,6 +283,22 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 - **API client:** `api.ts` checks each response's shape (a list where a list is expected; a run with id, stage, cases, defenses and isolation; a verification with a boolean `ok`). An unexpected 200 becomes an `ApiError`, never empty data. A proxy 502–504 without a JSON `detail` reads "The Bayora API is not answering".
 - **Lab:** the initial load sets `runLoad` to `failed` and shows the error instead of swallowing it. The error banner has **Dismiss**. A second start while busy is ignored (`busyRef`); tested with a double click.
 - **Audit trail:** `GET /api/audit/verify` runs when the page opens and after every run. A failed request clears any earlier result and shows "Verification could not run". **Verify again** replays the link walk. Tamper simulations are locked while one is in flight, so results cannot arrive out of order.
+
+### 2.9 Threat Model & Residual Risk Reporting Flow
+1. **Model Source (`docs/THREAT_MODEL.md`)**:
+   - Single source of truth specifying security boundaries, 11 evaluated threats, honest status tags (`Implemented`, `Partial`, `Simulated`, `Planned`), failure boundaries, and automated test linkages.
+2. **Control Plane Route (`GET /api/threat-model`)**:
+   - Invoked with `runs:read` permission.
+   - Reads `docs/THREAT_MODEL.md` from filesystem.
+   - Returns structured JSON containing raw markdown and parsed array of threats with fields: `threat`, `status`, `how`, `failure_mode`, `test`, `future`.
+3. **Frontend Rendering (`pages/Reports.tsx`)**:
+   - Top-level sub-navigation offers dual modes: "Run Report Document" (for completed execution runs) and "Architecture Threat Model".
+   - Threat Model view presents:
+     - Real-time metrics breakdown (total threats, implemented, partial, disclaimed).
+     - Status filter toggle buttons.
+     - Interactive matrix table with color-coded status badges, failure modes, and clickable test linkages.
+     - Side-by-side architectural guarantees vs real-world physical and host limitations.
+     - Collapsible raw specification disclosure.
 - **Test runs:** a loading state, whole-row selection (the id link remains the keyboard path), and an explained error with a way back for an unknown run id. A run's isolation checks appear as a summary, with the full list in a disclosure.
 - **Risk reports:** the report shown must match the selected id (`run.id === selectedId`). A failed run list or report load is shown as an error. A run without a report says so and links to resume it.
 - **Isolation lab:** "expected" (permission table) before probing and "observed" after. Each role shows the credential its probes used, and a role with no credential is expected to be refused everywhere.
