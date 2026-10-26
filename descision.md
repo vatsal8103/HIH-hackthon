@@ -1220,3 +1220,21 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Verified execution across all 7 stages to `report`, confirming case counts, defense mitigation, and `report["audit"]["ok"] is True`.
 - Verification: 7 unit tests in `backend/tests/test_imported_attacks.py` passed, `ruff check` and `ruff format` clean.
 
+## 2026-10-26 — Threat Model Update for Non-Container Process Isolation (Phase 9)
+- Status: Active
+- Decision: Update `docs/THREAT_MODEL.md` and the `GET /api/threat-model` endpoint to formally model both Docker container stacks and non-container local-process architectures, documenting host filesystem cross-contamination risks (`.run/<role>` DACLs), unauthenticated cross-role loopback reach, and target model outbound exfiltration protections.
+- Reason: The threat model must honestly capture the security boundaries and residual risks of non-container execution without claiming that local processes provide hypervisor-grade isolation.
+- Approach chosen:
+  - **Architecture Documentation (`docs/THREAT_MODEL.md`)**:
+    - Added comprehensive diagram and textual specification contrasting container bridge networks against local loopback architecture (ports 8000–8004, bubblewrap namespaces, firejail, service accounts, and Windows Job Objects).
+  - **Threat Matrix Additions (`docs/THREAT_MODEL.md`, `backend/app/main.py`)**:
+    - "Host filesystem cross-contamination in non-container mode": documented 0700/0600 file DACLs, scrubbed environment variables, and sandbox mounts.
+    - "Unauthenticated cross-role loopback reach": documented loopback binding, signed grant verification on peer endpoints, and host firewall barriers.
+    - "Target model outbound exfiltration": documented zero-credential target policy and non-loopback egress drops.
+    - Updated "Audit log tampering" to include standalone offline verification (`scripts/verify_audit.py`).
+  - **Endpoint Synchronization (`backend/app/main.py`)**:
+    - Synchronized `/api/threat-model` structured JSON return with the expanded threat matrix.
+  - **Automated Verification (`backend/tests/test_threat_model.py`)**:
+    - Validated that all required threat topics are present in documentation and served by the API.
+- Verification: 3 tests in `backend/tests/test_threat_model.py` passed, full test suite clean, frontend builds cleanly.
+
