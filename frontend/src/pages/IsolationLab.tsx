@@ -98,7 +98,11 @@ export function IsolationLab() {
         Scope: the matrix below tests application-level permissions in the backend. Active mode:{" "}
         <strong className="font-mono text-bone-100">{meta?.deployment.mode ?? "in-process"}</strong>.{" "}
         {meta?.deployment.mode === "local-process"
-          ? "Roles run as separate OS processes on 127.0.0.1 with isolated per-role credentials (mode 600) and Ed25519 signed requests."
+          ? `Roles run as separate OS processes on 127.0.0.1 with isolated per-role credentials (mode 600/700)${
+              meta?.deployment.os_isolation
+                ? ` and ${meta.deployment.os_isolation.summary}`
+                : ""
+            }.`
           : meta && Object.values(meta.deployment.roles).every((mode) => mode === "agent")
             ? "Container and network separation are checked separately: by the agents during every run (ISO-06, ISO-07 below) and, independently, by the Docker integration suite from outside the containers."
             : "In this local setup the roles run inside one process, so there is no container or network separation here; the Docker or local-process runner separates them."}

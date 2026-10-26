@@ -162,6 +162,9 @@ def connect(host: str, port: int, timeout: float = 1.5) -> str:
 
 def process_security() -> dict:
     """Controls observed from inside this process. Linux/container details when available, plus process info."""
+    from app import sandbox
+
+    caps = sandbox.detect_os_capabilities()
     mode = os.environ.get("BAYORA_MODE", "in-process")
     status_file = Path("/proc/self/status")
     if not status_file.exists():
@@ -174,6 +177,9 @@ def process_security() -> dict:
             "no_new_privs": False,
             "rootfs_read_only": False,
             "docker_socket": False,
+            "sandbox": caps["sandbox_tool"],
+            "sandbox_strength": caps["strength"],
+            "sandbox_summary": caps["summary"],
         }
     fields = dict(line.split(":", 1) for line in status_file.read_text().splitlines() if ":" in line)
     probe_file = Path("/.bayora-write-probe")
@@ -192,6 +198,9 @@ def process_security() -> dict:
         "no_new_privs": fields.get("NoNewPrivs", "").strip() == "1",
         "rootfs_read_only": read_only,
         "docker_socket": Path("/var/run/docker.sock").exists(),
+        "sandbox": caps["sandbox_tool"],
+        "sandbox_strength": caps["strength"],
+        "sandbox_summary": caps["summary"],
     }
 
 

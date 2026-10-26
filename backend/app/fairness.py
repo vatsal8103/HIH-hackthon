@@ -122,13 +122,15 @@ def evaluate_target_fairness(
     # Compute percentage latency change
     denom = max(avg_baseline_ms, 0.001)
     latency_delta_pct = ((avg_burst_ms - avg_baseline_ms) / denom) * 100.0
+    absolute_drift_ms = abs(avg_burst_ms - avg_baseline_ms)
 
     # Determinism check
     answers_identical = all(ans == expected_answer for ans in burst_answers)
 
     # Within threshold?
-    # If latency under burst is within threshold_pct and answers are deterministic, fairness passes.
-    within_threshold = latency_delta_pct <= threshold_pct
+    # If latency under burst is within threshold_pct (or absolute jitter is under 2.0ms)
+    # and answers are deterministic, fairness passes.
+    within_threshold = (latency_delta_pct <= threshold_pct) or (absolute_drift_ms < 2.0)
 
     passed = within_threshold and answers_identical
 

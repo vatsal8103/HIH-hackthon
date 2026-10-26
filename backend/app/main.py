@@ -32,6 +32,8 @@ from app.auth import PERMISSIONS, Principal, require, validate_tokens
 
 
 def deployment() -> dict:
+    from app import sandbox
+
     agents = {role: "agent" if remote.agent_url(role) else "in-process" for role in remote.AGENT_ENV}
     mode = os.environ.get("BAYORA_MODE")
     if not mode:
@@ -41,11 +43,19 @@ def deployment() -> dict:
             mode = "local-process"
         else:
             mode = "in-process"
+    os_caps = sandbox.detect_os_capabilities()
     return {
         "mode": mode,
         "roles": agents,
         "checkpoint": "witness" if checkpoint.configured() else "not-configured",
         "credentials": "signed" if credentials.signed_roles() else "static",
+        "os_isolation": {
+            "platform": os_caps["platform"],
+            "sandbox": os_caps["sandbox_tool"],
+            "strength": os_caps["strength"],
+            "summary": os_caps["summary"],
+            "details": os_caps["details"],
+        },
     }
 
 
@@ -160,7 +170,7 @@ def controls(target: dict | None = None) -> list[dict]:
                 "Red, Blue and Target run as separate non-root, read-only agent containers holding only their own credential."
                 if isolated and deployment().get("mode") == "docker"
                 else (
-                    "Red, Blue and Target run as separate OS processes on 127.0.0.1 with isolated per-role credentials."
+                    f"Red, Blue and Target run as separate OS processes on 127.0.0.1 with {deployment().get('os_isolation', {}).get('summary', 'process isolation')} and isolated per-role credentials."
                     if isolated and deployment().get("mode") == "local-process"
                     else (
                         "Red, Blue and Target run as separate isolated agents."

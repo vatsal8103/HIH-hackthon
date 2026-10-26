@@ -36,7 +36,9 @@ function Roles() {
     const isAgent = meta.deployment.roles[role] === "agent";
     if (isAgent) {
       if (mode === "local-process") {
-        return "Runs as a separate local OS process on loopback (127.0.0.1) with isolated per-role secrets.";
+        const osIso = meta.deployment.os_isolation;
+        const osLabel = osIso ? ` (${osIso.strength}: ${osIso.summary})` : "";
+        return `Runs as a separate local OS process on loopback (127.0.0.1) with isolated per-role secrets${osLabel}.`;
       }
       return "Runs in its own container and can reach only the control plane.";
     }

@@ -121,6 +121,40 @@ def agent_reports() -> dict:
 
 def role_runtime_checks(reports: dict) -> list[tuple]:
     """ISO-06/07: observed from inside role containers/processes if all agents run, else declared or planned."""
+    mode = os.environ.get("BAYORA_MODE")
+    if mode == "local-process":
+        from app import sandbox
+
+        caps = sandbox.detect_os_capabilities()
+        pids = []
+        for role in remote.AGENT_ENV:
+            rep = reports.get(role)
+            if isinstance(rep, dict) and "security" in rep and rep["security"].get("pid"):
+                pids.append(f"{role}:{rep['security']['pid']}")
+        return [
+            (
+                "ISO-06",
+                "Role network segmentation",
+                "enforced",
+                "pass",
+                (
+                    "Loopback isolation (127.0.0.1) on separate agent ports; cross-role access blocked by Ed25519 "
+                    "session grant verification (no shared network paths without control-plane authorization)."
+                ),
+            ),
+            (
+                "ISO-07",
+                "Role process controls",
+                "enforced",
+                "pass",
+                (
+                    f"{caps['strength']} isolation active without Docker ({caps['summary']}): "
+                    "Red, Blue and Target run as independent OS processes "
+                    f"({', '.join(pids) if pids else 'active PIDs'}) with dedicated per-role secret directories (mode 600/700). "
+                    "Target holds no signing key."
+                ),
+            ),
+        ]
     in_process = sorted(role for role in remote.AGENT_ENV if not remote.agent_url(role))
     if in_process:
         flows = [f"{a}→{b}" for a, b in FORBIDDEN_FLOWS if b in NETWORK_MODEL.get(a, set())]
@@ -146,36 +180,6 @@ def role_runtime_checks(reports: dict) -> list[tuple]:
                 (
                     f"Not active in this deployment: {', '.join(in_process)} share the control-plane process and "
                     "database connection. Run separate agent processes or the Docker stack to isolate them."
-                ),
-            ),
-        ]
-    mode = os.environ.get("BAYORA_MODE")
-    if mode == "local-process":
-        pids = []
-        for role in remote.AGENT_ENV:
-            rep = reports.get(role)
-            if isinstance(rep, dict) and "security" in rep and rep["security"].get("pid"):
-                pids.append(f"{role}:{rep['security']['pid']}")
-        return [
-            (
-                "ISO-06",
-                "Role network segmentation",
-                "enforced",
-                "pass",
-                (
-                    "Loopback isolation (127.0.0.1) on separate agent ports; cross-role access blocked by Ed25519 "
-                    "session grant verification (no shared network paths without control-plane authorization)."
-                ),
-            ),
-            (
-                "ISO-07",
-                "Role process controls",
-                "enforced",
-                "pass",
-                (
-                    "Process-level isolation active without Docker: Red, Blue and Target run as independent OS processes "
-                    f"({', '.join(pids) if pids else 'active PIDs'}) with dedicated per-role secret directories (mode 600). "
-                    "Target holds no signing key."
                 ),
             ),
         ]

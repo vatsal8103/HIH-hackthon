@@ -1099,3 +1099,25 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: Loopback process isolation separates process memory and environment variables, but does not provide Linux network namespaces or kernel-level filesystem isolation without root/bwrap (addressed in Phase 2).
 - Verification: 5 unit and negative tests in `backend/tests/test_local_process_isolation.py` (proves per-role key segregation, cross-role request rejection, target grant validation, and loud 502 failure on killed agents). Full test suite (284 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `npm run build` clean, and 58 frontend unit tests passed.
 
+## 2026-10-26 — OS-Level Sandboxing & Isolation Detection (Phase 2)
+- Status: Active
+- Decision: Add native OS-level sandboxing detection and optional enforcement layers (Linux bubblewrap, firejail, dedicated OS service accounts, Windows Job Objects) with honest labeling ("OS-level", "process-level", "cryptographic", "simulated", "planned"). Never claim "secure" or "safe".
+- Reason: While local process isolation (Phase 1) separates memory and environment variables, discretionary filesystem access control and unprivileged namespace containment further restrict unauthorized cross-role file inspection and enforce clean child cleanup on host systems without Docker.
+- Approach chosen:
+  - **OS Sandboxing Detection & Wrapping (`backend/app/sandbox.py`)**:
+    - Auto-detects available host isolation primitives: Linux `bwrap` (bubblewrap unprivileged user/mount/pid namespaces), `firejail`, separate OS users (`bayora-cp`, `bayora-red`, `bayora-blue`, `bayora-target`, `bayora-witness`), and Windows Job Objects API (via 64-bit `ctypes` with `wintypes.HANDLE` bindings).
+    - `build_sandbox_command(role, cmd, run_dir)`: wraps execution in bubblewrap (`--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-user --unshare-ipc --unshare-pid --unshare-uts --bind .run/<role> .run/<role>`) or firejail where present, or defaults to direct process-level execution with honest labeling.
+    - `setup_windows_job_object()`: on Windows, creates a Job Object and assigns the current process to guarantee containment and process-tree cleanup.
+    - `verify_file_isolation(accessor, target, run_dir)`: programmatic probe testing whether an accessor role can read another role's `env.json` secrets.
+  - **Runner Integration (`backend/app/agent_runner.py`)**:
+    - Automatically wraps child agent processes in detected sandbox (`bwrap`/`firejail`) using `os.execvpe` when `BAYORA_SANDBOX_ACTIVE` is unset, and assigns Windows Job Objects on Windows hosts.
+  - **Control Plane & Audit Exposure (`backend/app/main.py`, `backend/app/isolation.py`)**:
+    - `deployment()` returns `os_isolation` schema with `platform`, `sandbox`, `strength`, `summary`, and `details`.
+    - `ISO-07` in `role_runtime_checks()` reports the exact detected OS isolation layer and strength.
+  - **Dedicated Service Account Provisioning (`scripts/setup_users.sh`, `scripts/setup_users.ps1`)**:
+    - Scripts to provision unprivileged system accounts (`bayora-cp`, `bayora-red`, `bayora-blue`, `bayora-target`, `bayora-witness`) and configure 0700/0600 POSIX permissions or Windows `icacls` DACLs on `.run/<role>`.
+  - **Frontend UI (`api.ts`, `HowItWorks.tsx`, `IsolationLab.tsx`)**:
+    - Updated type definitions and rendered badges/notes with the detected OS sandbox summary and real strength.
+- Trade-offs: Without root privileges or pre-installed `bwrap` on Linux, isolation remains at the process level (PID separation, scrubbed environment, loopback network boundary, file mode 600/700). The system honestly reports this level rather than claiming full OS containerization.
+- Verification: 8 tests in `backend/tests/test_os_sandboxing.py` covering capability schema, command wrapping for bubblewrap and firejail, filesystem permission verification, API metadata exposure, ISO-07 reporting, and Windows Job Object assignment. Full backend test suite (292 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `tsc --noEmit` clean, `npm run build` clean, and 58 frontend unit tests passed.
+
