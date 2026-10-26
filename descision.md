@@ -1153,5 +1153,18 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
   - **Cross-Session and Deliberate Leak Tests (`backend/tests/test_llm_isolation.py`)**:
     - Verified negative tests: canary test with `deliberate_leak=True` catches simulated KV-cache leakage; output scanner with deliberate defense rule leaks fails loudly; cross-session context guard detects prior session text injection.
 - Trade-offs: Setting `keep_alive=0` incurs a cold-start reload penalty when testing with live local Ollama models on GPU, but guarantees complete memory isolation between test sessions. For low-latency production suites, `BAYORA_OLLAMA_KEEP_ALIVE` can be adjusted with documented security trade-offs.
-- Verification: 12 tests in `backend/tests/test_llm_isolation.py` and 61 tests in `backend/tests/test_providers.py` (proves fresh session context, canary leak detection, output isolation, advisory reporting, target credential absence, and grant validation). Full test suite (297 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, and frontend unit tests passed.
+## 2026-10-26 — Continuous Monitoring & Role Crash Alerting (Phase 5)
+- Status: Active
+- Decision: Add `PROCESS_CRASH` reason code to continuous monitoring subsystem, and hook `remote.RemoteError` exceptions in the FastAPI control plane to automatically record role failure alerts with audit provenance before returning 502 status.
+- Reason: In non-container local process execution, child agents can terminate unexpectedly, run out of memory, or be halted by host signals. Logging these events in the tamper-evident audit monitor guarantees immediate visibility to operators without needing container orchestrator events.
+- Approach chosen:
+  - **Reason Code Registration (`backend/app/monitor.py`)**:
+    - Added `"PROCESS_CRASH": "Role agent process terminated, crashed, or unreachable (502)"` to `REASON_CODES`.
+  - **Exception Handler Hook (`backend/app/main.py`)**:
+    - In `@app.exception_handler(remote.RemoteError)`, parsed failing role name from error context and recorded a `PROCESS_CRASH` alert in the audit log via `monitor.record_alert()` before returning HTTP 502.
+    - Handled potential DB/IO logging errors gracefully with fallback logger warnings so the 502 response is never obstructed.
+  - **Verification (`backend/tests/test_monitor.py`)**:
+    - Added `test_remote_failure_records_process_crash_alert` testing mock agent crash (`RemoteError`), verifying 502 HTTP response, and asserting that `GET /api/alerts` surfaces the `PROCESS_CRASH` alert for the failed role.
+- Trade-offs: Role identification in `RemoteError` relies on string parsing of the exception detail when the remote client does not pass explicit role metadata, but defaults safely to `"agent"` if unmatched.
+- Verification: 6 unit tests in `backend/tests/test_monitor.py` passed (including `PROCESS_CRASH` alert logging and rate limiting), `ruff check` clean, and `ruff format` clean.
 

@@ -1,7 +1,9 @@
 """Bayora API. Every route declares the single permission it needs (see auth.PERMISSIONS)."""
 
 import json
+import logging
 import os
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -286,9 +288,21 @@ def provider_handler(_request: Request, exc: providers.ProviderError):
     return JSONResponse(status_code=502, content={"detail": f"Target provider failure: {exc}"})
 
 
+logger = logging.getLogger(__name__)
+
+
 @app.exception_handler(remote.RemoteError)
 def remote_handler(_request: Request, exc: remote.RemoteError):
     # The stage's transaction has rolled back; nothing was done in-process instead.
+    msg = str(exc).lower()
+    role = (
+        "red" if "red" in msg else ("blue" if "blue" in msg else ("target" if "target" in msg else "agent"))
+    )
+    try:
+        with db.connect() as conn:
+            monitor.record_alert(conn, role, _request.url.path, "PROCESS_CRASH")
+    except (sqlite3.Error, OSError, RuntimeError) as alert_err:
+        logger.warning("Failed to record crash alert: %s", alert_err)
     return JSONResponse(status_code=502, content={"detail": f"Role service failure: {exc}"})
 
 

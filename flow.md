@@ -504,6 +504,7 @@ flowchart TD
    - Cross-boundary detection in `auth.require()` triggers `CROSS_BOUNDARY_ACCESS` when Red accesses `/api/blue/` or Blue accesses `/api/red/`.
    - Signed token verification in `auth._signed()` triggers `INVALID_SIGNATURE`, `TOKEN_REPLAYED`, or `TOKEN_EXPIRED`.
    - Request burst tracking in `monitor.record_role_request()` triggers `RATE_EXCEEDED` if a single role exceeds 30 requests in 5 seconds.
+   - Remote agent process crashes or unreachable network errors handled in `@app.exception_handler(remote.RemoteError)` trigger `PROCESS_CRASH` before returning HTTP 502.
    - Interactive verification via `POST /api/alerts/demo` triggers `DEMO_VIOLATION` for live demonstrations.
 2. **Strict Redaction Guarantee:**
    - Stored alert schema records only `id`, `ts`, `role`, `route`, `reason`, and coarse metadata (`status_code`, `method`, `via`).

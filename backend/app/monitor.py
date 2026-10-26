@@ -29,6 +29,7 @@ REASON_CODES = {
     "TOKEN_REPLAYED": "Token replayed, reused jti, or revoked key id",
     "TOKEN_EXPIRED": "Token expired or presented outside valid time window",
     "RATE_EXCEEDED": "Unusual request burst rate from role",
+    "PROCESS_CRASH": "Role agent process terminated, crashed, or unreachable (502)",
     "DEMO_VIOLATION": "Simulated cross-boundary violation for live demonstration",
 }
 
