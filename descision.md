@@ -1260,3 +1260,17 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
     - Documented host firewall scripts (`setup_firewall.sh`, `setup_firewall.ps1`) and dedicated service account scripts (`setup_users.sh`, `setup_users.ps1`).
 - Verification: Validated markdown syntax, links, and command examples across `docs/DEMO_SCRIPT.md` and `README.md`.
 
+## 2026-10-27: Unified `main.py` launcher at project root
+
+- **Date:** 2026-10-27
+- **Decision:** Create a single `main.py` at the project root that starts both the FastAPI backend (port 8000) and the Vite frontend dev server (port 5173) as subprocesses.
+- **Rationale:** User requested a one-command startup. Previously required two terminals.
+- **Approach:**
+  - Loads `.env` with a simple parser (no `python-dotenv` dependency).
+  - Auto-installs deps (`uv sync`, `npm install`) if `.venv` or `node_modules` are missing.
+  - Forces UTF-8 stdout on Windows to avoid cp1252 encoding errors.
+  - All output uses ASCII-only characters (no emoji/Unicode box-drawing) for Windows compatibility.
+  - Graceful shutdown via `taskkill /F /T` on Windows, `os.killpg` on Unix.
+  - Supports `--back` (backend only) and `--front` (frontend only) flags.
+- **Files:** `main.py` (project root).
+- **Verified:** Both servers start successfully and serve on their respective ports.
