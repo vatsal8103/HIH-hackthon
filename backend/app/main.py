@@ -26,7 +26,7 @@ from app import (
     providers,
     remote,
 )
-from app.attacks import ATTACKS, BY_ID
+from app.attacks import ALL_ATTACKS, BY_ID, DEFAULT_ATTACK_IDS
 from app.auth import PERMISSIONS, Principal, require, validate_tokens
 
 
@@ -371,7 +371,7 @@ def meta(_role: str = Depends(require("runs:read"))):
 
 @app.get("/api/attacks")
 def list_attacks(_role: str = Depends(require("attacks:read"))):
-    return ATTACKS
+    return ALL_ATTACKS
 
 
 @app.get("/api/runs")
@@ -396,7 +396,7 @@ def list_runs(_role: str = Depends(require("runs:read"))):
 
 @app.post("/api/runs", status_code=201)
 def create_run(body: RunCreate, _role: str = Depends(require("runs:write"))):
-    requested = body.attack_ids if body.attack_ids is not None else [a["id"] for a in ATTACKS]
+    requested = body.attack_ids if body.attack_ids is not None else DEFAULT_ATTACK_IDS
     attack_ids = list(dict.fromkeys(requested))
     unknown = [a for a in attack_ids if a not in BY_ID]
     if unknown or not attack_ids:

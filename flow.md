@@ -249,6 +249,25 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 6. When the loop ends, `playing` and `busy` clear, and the scene shows the final recorded state.
 7. Other pages refetch on `version`. Run detail prefers `lab.run` while the run is active.
 
+### 2.6 Public Safety Benchmarks & Attack Selection Flow
+1. **Attack Definitions (`app/attacks.py`)**:
+   - `CORE_ATTACKS`: The 7 pristine synthetic clinic attacks (`BN-00` through `PR-06`).
+   - `IMPORTED_ATTACKS`: 25 public benchmark attacks loaded at startup from `app/data/imported_attacks.json` (Lakera Gandalf, JailbreakBench, AdvBench, HarmBench).
+   - `ALL_ATTACKS`: Core attacks decorated with source/license/category metadata + imported attacks (total 32 attacks).
+   - `BY_ID`: An `AttackRegistry(dict)` that routes iteration to `DEFAULT_ATTACK_IDS` (core 7) for baseline suite stability, while supporting indexing and membership lookups across all 32 attacks.
+2. **Run Dispatch (`POST /api/runs`)**:
+   - If `body.attack_ids` is omitted, the run defaults to `DEFAULT_ATTACK_IDS` (`["BN-00", ..., "PR-06"]`).
+   - If the operator selects specific imported benchmarks (e.g., `["GD-01", "JB-03"]`), `main.py` validates each ID against `BY_ID`, instantiates test cases only for the requested attacks, and executes them through the full pipeline.
+3. **Execution & Evaluation**:
+   - Red executes the attacks in the specified order.
+   - Target evaluates each attack through either the live provider or the deterministic simulator (with broadened regex heuristics for injection and secret extraction).
+   - Evaluator verifies criteria compliance (`no-secret-disclosure`, `instruction-hierarchy`, `refuse-disallowed`, `no-over-refusal`).
+   - Results are cryptographically signed and anchored to the witness chain.
+4. **UI Attack Library (`frontend/src/pages/AttackLibrary.tsx`)**:
+   - Fetches all attacks via `GET /api/attacks`.
+   - Offers multi-dimensional filtering by benchmark Source (`All Sources`, `Bayora Core`, `Lakera Gandalf`, `JailbreakBench`, `AdvBench`, `HarmBench`) and Category.
+   - Displays technique badges, source links, and open-source licenses.
+
 ### 2.7 Guided demo (`#/demo`, `pages/Demo.tsx`)
 1. `GET /api/attacks` once. The selected case defaults to `PI-01` (its first attempt fails in the seeded catalogue, so every step has content); the presenter can pick another.
 2. The data source is `lab.run`, the latest run. A step after step 2 renders only if that run has a report and contains the case. Otherwise `NeedsRun` states the exact reason: loading, failed to load, no runs, latest run unfinished, or latest run lacks the case. It offers **Run <id> now** (`lab.start([id])`), **Resume** for an unfinished run, or **Back to step 2**; while busy it shows the live step. Each step is labelled with its kind: explains, can start a test, shows recorded data, or read-only check.

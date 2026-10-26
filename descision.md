@@ -1018,3 +1018,22 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
   - **Honest Disclaimer**: Transparently updated reports and isolation detail to state: "Timing side channels are reduced via response-time quantization and container resource limits, but not completely eliminated on shared host hardware."
 - Trade-offs: Response-time quantization adds up to 10ms padding on role requests; host microarchitectural contention cannot be fully eliminated without dedicated physical cores.
 - Verification: 9 unit tests in `backend/tests/test_fairness.py` (fairness evaluation, latency threshold breach failure, non-deterministic answer failure, sync & async padding, role route headers, container limits, ISO-12 integration). Full backend suite passing (270 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 57 frontend tests passed.
+
+## 2026-10-26 — Public safety datasets import and attack library filters (Part 4)
+- Status: Active
+- Decision: Add `backend/app/data/imported_attacks.json`, `scripts/import_attacks.py`, dataset source and category filters in `frontend/src/pages/AttackLibrary.tsx`, and an `AttackRegistry` dict proxy in `backend/app/attacks.py`.
+- Reason (Stated by user): Support standard public AI safety benchmarks (Lakera Gandalf, JailbreakBench, AdvBench, HarmBench) alongside Bayora's core synthetic clinic scenario, allowing security operators to filter, inspect, and execute targeted evaluations across standardized attack libraries.
+- Approach chosen:
+  - **Attack Preservation & Registry (`app/attacks.py`)**: To preserve backward compatibility and exact hash digests for existing regression tests (`test_ii04_design.py` requires exact sha256 `457855d296f34133f219d4c19464d0cdfd611c237e442ec7e76e1f55a812a8f4` over core attacks, and `test_evaluator.py` checks simulator baselines), `CORE_ATTACKS` remains byte-for-byte identical to the original 7 core attacks. `ALL_ATTACKS` merges core attacks (augmented with category, source, source_url, license metadata) and 25 imported benchmark cases. `BY_ID` implements `AttackRegistry(dict)` where iteration and length default to `DEFAULT_ATTACK_IDS` (7 core attacks) while dictionary indexing (`BY_ID[id]`) and membership (`id in BY_ID`) seamlessly resolve any attack across all 32.
+  - **Dataset Representation**: 25 benchmark prompts across:
+    - Lakera Gandalf: 8 real prompt injection and canary exfiltration attempts.
+    - JailbreakBench: 8 harmful behaviors and persona escape attacks.
+    - AdvBench: 5 harmful instruction refusal tests.
+    - HarmBench: 4 contextual and indirect harm categories.
+  - **Import Script (`scripts/import_attacks.py`)**: CLI and library with automated schema validation and criterion mapping for importing community JSON or CSV benchmark files.
+  - **Frontend UI Enhancements (`AttackLibrary.tsx`)**:
+    - Filter controls for benchmark Source ("All Sources", "Bayora Core", "Lakera Gandalf", "JailbreakBench", "AdvBench", "HarmBench") and Category.
+    - Prominent metadata badges: Source tag with external citation link (`source_url`), Category badge, and open-source License tag (`MIT`, `Apache-2.0`, `CC-BY-4.0`).
+    - Attack count readout and direct execution utilities for custom subsets.
+- Trade-offs: Simulator heuristics in `target.py` were broadened to recognize general instruction overrides and secret inquiries deterministically, ensuring imported benchmark tests produce clear evaluation verdicts.
+- Verification: 6 unit tests in `backend/tests/test_imported_attacks.py` (loading, attribute validation, JSON/CSV script import, custom run execution with imported attack IDs). Full backend suite (276 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 57 frontend unit tests passed.

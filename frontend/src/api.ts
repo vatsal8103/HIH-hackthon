@@ -16,6 +16,10 @@ export interface Attack {
   prompt: string;
   criteria: string[];
   recommendation: string;
+  category?: string;
+  source?: string;
+  source_url?: string;
+  license?: string;
 }
 
 export interface CriterionResult {
