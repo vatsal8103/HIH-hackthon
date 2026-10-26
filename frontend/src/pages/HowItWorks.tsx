@@ -30,16 +30,26 @@ function Role({ color, name, plain, children, where }: { color: keyof typeof SWA
 function Roles() {
   const { meta } = useLab();
   const notice = targetNotice(meta?.target);
-  const separate = (role: string) =>
-    meta?.deployment.roles[role] === "agent"
-      ? "Runs in its own container and can reach only the control plane."
-      : meta
-        ? "Runs inside the API process in this local setup (the Docker stack separates it)."
-        : "";
+  const mode = meta?.deployment.mode ?? "in-process";
+  const separate = (role: string) => {
+    if (!meta) return "";
+    const isAgent = meta.deployment.roles[role] === "agent";
+    if (isAgent) {
+      if (mode === "local-process") {
+        return "Runs as a separate local OS process on loopback (127.0.0.1) with isolated per-role secrets.";
+      }
+      return "Runs in its own container and can reach only the control plane.";
+    }
+    return "Runs inside the API process in this local setup (separate process mode isolates it).";
+  };
   const target = meta?.target;
   return (
     <section>
-      <SectionHead index="01" title="Who is involved" />
+      <SectionHead
+        index="01"
+        title="Who is involved"
+        aside={<span className="font-mono text-[11px] text-bone-400 uppercase tracking-widest">Active mode: {mode}</span>}
+      />
       <div className="mt-6 grid gap-px bg-ink-700 md:grid-cols-2 xl:grid-cols-4">
         <Role color="red" name="Red Team" plain="the tester" where={separate("red")}>
           <p>Submits scripted attack prompts from the attack library, one test case at a time.</p>

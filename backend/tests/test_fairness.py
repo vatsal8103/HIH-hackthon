@@ -113,7 +113,9 @@ def test_iso12_integrated_in_isolation_run_checks(client):
     session_id = run["id"]
 
     with db.connect() as conn:
-        checks = isolation.run_checks(conn, client.app, session_id, operator_auth=auth("operator")["Authorization"])
+        checks = isolation.run_checks(
+            conn, client.app, session_id, operator_auth=auth("operator")["Authorization"]
+        )
     checks_by_id = {c["check_id"]: c for c in checks}
 
     assert "ISO-12" in checks_by_id

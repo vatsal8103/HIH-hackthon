@@ -132,7 +132,9 @@ def check_alerts_rate_limit(max_requests: int = 60, window_seconds: float = 60.0
         _ALERTS_ENDPOINT_CALLS.popleft()
 
     if len(_ALERTS_ENDPOINT_CALLS) >= max_requests:
-        raise HTTPException(status_code=429, detail="Alerts query rate limit exceeded (coarse side-channel mitigation)")
+        raise HTTPException(
+            status_code=429, detail="Alerts query rate limit exceeded (coarse side-channel mitigation)"
+        )
 
     _ALERTS_ENDPOINT_CALLS.append(now)
 

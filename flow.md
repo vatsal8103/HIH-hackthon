@@ -32,6 +32,32 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 
 **Dev** (two local processes): Vite proxy → API. Red, Blue and Target run inside the API process, and there is no witness unless `BAYORA_WITNESS_URL` is set. The UI shows "Roles: in-process" and "Anchor: none", and the isolation checks for network and containers are `simulated` or `planned`.
 
+**Local Process Isolation (`BAYORA_MODE=local-process`, `scripts/run_local.sh` or `.ps1`)**:
+Runs 6 independent OS processes bound strictly to `127.0.0.1` without Docker.
+- `cp` (Control Plane on `:8000`): Holds CP signing key + Red/Blue public verification keys.
+- `witness` (Independent Witness on `:8001`): Holds its own append-only log under `.run/witness/`.
+- `red` (Red Team Agent on `:8002`): Holds only Red private signing key; accepts dispatches from CP with valid grant; signs all API calls back to `:8000`.
+- `blue` (Blue Team Agent on `:8003`): Holds only Blue private signing key; accepts dispatches from CP with valid grant; signs all API calls back to `:8000`.
+- `target` (Target Model Agent on `:8004`): Holds ONLY CP public verification keys (zero private signing keys); accepts dispatches from CP; evaluates attacks against deterministic or live models; initiates zero outbound API calls.
+- `frontend` (Vite dev server on `:5173`): Serves UI and proxies `/api` to `:8000`.
+
+Isolation boundary:
+- Scrubbed environments: Each agent process starts with cleared parent environment variables and reads strictly from isolated `.run/<role>/env.json`.
+- File system: `.run/<role>` folders with strict POSIX permissions (`0o700` dirs, `0o600` secret files).
+- Network boundary: Bound strictly to loopback (`127.0.0.1`). Cross-role requests without a CP-signed Ed25519 grant are cryptographically rejected (401/403).
+- Failure boundary: Agent crashes or deadlocks fail loudly with 502 Bad Gateway and roll back the stage transaction; no fallback to in-process execution is permitted.
+
+```mermaid
+flowchart LR
+  B[Browser :5173] -- /api proxy --> API[Control Plane :8000<br/>CP signing key, Red/Blue pubkeys]
+  API -- HTTP + CP Grant --> R[Red Agent :8002<br/>Red private key]
+  API -- HTTP + CP Grant --> BL[Blue Agent :8003<br/>Blue private key]
+  API -- HTTP + CP Grant --> T[Target Agent :8004<br/>CP pubkey only, ZERO signing keys]
+  API -- Checkpoint POST --> W[Witness :8001<br/>.run/witness log]
+  R -. signed API calls .-> API
+  BL -. signed API calls .-> API
+```
+
 **Docker** (`docker-compose.yml`): eight long-running services plus the one-shot `migrate` job, one network per path. Every network except `public` is `internal: true`, with no outside route.
 
 ```mermaid

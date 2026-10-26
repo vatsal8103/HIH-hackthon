@@ -33,7 +33,16 @@ from app.auth import PERMISSIONS, Principal, require, validate_tokens
 
 def deployment() -> dict:
     agents = {role: "agent" if remote.agent_url(role) else "in-process" for role in remote.AGENT_ENV}
+    mode = os.environ.get("BAYORA_MODE")
+    if not mode:
+        if Path("/.dockerenv").exists():
+            mode = "docker"
+        elif any(remote.agent_url(role) for role in remote.AGENT_ENV):
+            mode = "local-process"
+        else:
+            mode = "in-process"
     return {
+        "mode": mode,
         "roles": agents,
         "checkpoint": "witness" if checkpoint.configured() else "not-configured",
         "credentials": "signed" if credentials.signed_roles() else "static",
@@ -147,18 +156,36 @@ def controls(target: dict | None = None) -> list[dict]:
         {
             "name": "Per-role container isolation",
             "status": "implemented" if isolated else "planned",
-            "detail": "Red, Blue and Target run as separate non-root, read-only agent containers holding only "
-            "their own credential."
-            if isolated
-            else f"Not active here: {', '.join(in_process)} run inside the control-plane process. The Docker "
-            "stack runs them as separate containers.",
+            "detail": (
+                "Red, Blue and Target run as separate non-root, read-only agent containers holding only their own credential."
+                if isolated and deployment().get("mode") == "docker"
+                else (
+                    "Red, Blue and Target run as separate OS processes on 127.0.0.1 with isolated per-role credentials."
+                    if isolated and deployment().get("mode") == "local-process"
+                    else (
+                        "Red, Blue and Target run as separate isolated agents."
+                        if isolated
+                        else f"Not active here: {', '.join(in_process)} run inside the control-plane process. The Docker stack runs them as separate containers."
+                    )
+                )
+            ),
         },
         {
             "name": "Role network segmentation",
             "status": "implemented" if isolated else "simulated",
-            "detail": "One internal Docker network per role path; probed from inside each role container."
-            if isolated
-            else "Declared model only in this deployment.",
+            "detail": (
+                "One internal Docker network per role path; probed from inside each role container."
+                if isolated and deployment().get("mode") == "docker"
+                else (
+                    "Loopback isolation (127.0.0.1) per agent port; cross-role calls rejected by Ed25519 grant verification."
+                    if isolated and deployment().get("mode") == "local-process"
+                    else (
+                        "One internal network per role path; probed from inside each role container."
+                        if isolated
+                        else "Declared model only in this deployment."
+                    )
+                )
+            ),
         },
         {
             "name": "Operator credential kept out of the browser",

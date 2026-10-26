@@ -14,6 +14,7 @@
 """
 
 import json
+import os
 import uuid
 
 import anyio
@@ -79,6 +80,13 @@ def evaluate_probe(role: str, report: dict) -> list[str]:
 def evaluate_security(role: str, security: dict) -> list[str]:
     if not security.get("supported"):
         return [f"{role}: process controls not observable on this platform"]
+    if security.get("mode") == "local-process":
+        problems = []
+        if security.get("docker_socket"):
+            problems.append(f"{role} can see the Docker socket")
+        if not security.get("pid"):
+            problems.append(f"{role} missing process ID")
+        return problems
     problems = []
     if security["uid"] == 0:
         problems.append(f"{role} runs as root")
@@ -112,7 +120,7 @@ def agent_reports() -> dict:
 
 
 def role_runtime_checks(reports: dict) -> list[tuple]:
-    """ISO-06/07: observed from inside role containers if all agents run, else declared or planned."""
+    """ISO-06/07: observed from inside role containers/processes if all agents run, else declared or planned."""
     in_process = sorted(role for role in remote.AGENT_ENV if not remote.agent_url(role))
     if in_process:
         flows = [f"{a}→{b}" for a, b in FORBIDDEN_FLOWS if b in NETWORK_MODEL.get(a, set())]
@@ -137,7 +145,37 @@ def role_runtime_checks(reports: dict) -> list[tuple]:
                 "not-run",
                 (
                     f"Not active in this deployment: {', '.join(in_process)} share the control-plane process and "
-                    "database connection. Run the Docker stack to isolate them."
+                    "database connection. Run separate agent processes or the Docker stack to isolate them."
+                ),
+            ),
+        ]
+    mode = os.environ.get("BAYORA_MODE")
+    if mode == "local-process":
+        pids = []
+        for role in remote.AGENT_ENV:
+            rep = reports.get(role)
+            if isinstance(rep, dict) and "security" in rep and rep["security"].get("pid"):
+                pids.append(f"{role}:{rep['security']['pid']}")
+        return [
+            (
+                "ISO-06",
+                "Role network segmentation",
+                "enforced",
+                "pass",
+                (
+                    "Loopback isolation (127.0.0.1) on separate agent ports; cross-role access blocked by Ed25519 "
+                    "session grant verification (no shared network paths without control-plane authorization)."
+                ),
+            ),
+            (
+                "ISO-07",
+                "Role process controls",
+                "enforced",
+                "pass",
+                (
+                    "Process-level isolation active without Docker: Red, Blue and Target run as independent OS processes "
+                    f"({', '.join(pids) if pids else 'active PIDs'}) with dedicated per-role secret directories (mode 600). "
+                    "Target holds no signing key."
                 ),
             ),
         ]

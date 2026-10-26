@@ -1082,5 +1082,20 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Reason (Stated by user): Ensure the demo can be executed immediately on systems where Docker Desktop is not running, with zero external cloud APIs or API keys required.
 - Approach chosen: PowerShell automation starts backend Uvicorn server on port 8000 and Vite dev server on port 5173, opening the browser directly to `http://localhost:5173/#/demo`.
 - Trade-offs: Local mode uses SQLite and in-process role agents rather than isolated network containers, while preserving all audit chain, evaluation, and monitoring capabilities.
-- Verification: Tested in-process backend startup and Vite proxy configuration.
+## 2026-10-26 — Real OS process isolation without Docker (Phase 1)
+- Status: Active
+- Decision: Replace in-process dev roles with real, independent OS processes using loopback binding (127.0.0.1) and segregated per-role secret directories (.run/) with strict permissions (0o600 for files, 0o700 for directories). Introduce `BAYORA_MODE=local-process` to govern runtime behavior.
+- Reason: When Docker is unavailable on a host machine, running all roles inside a single Python process permits memory and secret cross-contamination. Real process isolation guarantees independent address spaces, per-process environment segregation, and enforces genuine asymmetric Ed25519 request signing.
+- Approach chosen:
+  - **Isolated Secret Management (`backend/app/local_setup.py`)**: Provisions dedicated per-role directories (`.run/cp`, `.run/red`, `.run/blue`, `.run/target`, `.run/witness`, `.run/frontend`) with mode 600/700 permissions. The Target agent holds NO private signing key (only CP public key). Each agent's environment receives strictly its own key.
+  - **Process Runner (`backend/app/agent_runner.py`)**: Launches a specified role agent with clean environment scrubbing, injecting only its isolated config from `.run/<role>/env.json` and binding to dedicated loopback ports (CP: 8000, Witness: 8001, Red: 8002, Blue: 8003, Target: 8004).
+  - **Dynamic Loopback Probe Targets (`backend/agents/common.py`)**: Dynamically resolves probe targets to loopback ports in local-process mode while preserving Docker compose service names in docker mode.
+  - **Runtime Mode Awareness (`backend/app/main.py`, `backend/app/isolation.py`)**: Exposes `BAYORA_MODE` ("local-process", "in-process", "docker") via `/api/meta`. Updates `ISO-06` (network segmentation on loopback with authentication barrier) and `ISO-07` (process-level isolation with PID tracking and per-role keys).
+  - **One-Command Runners (`scripts/run_local.ps1`, `scripts/run_local.sh`)**: Orchestrates automated secret provisioning, process startup, health polling across all 5 backend services, frontend proxy startup, and clean child process termination.
+  - **Frontend UI (`api.ts`, `HowItWorks.tsx`, `IsolationLab.tsx`)**: Displays active mode badge and honest explanations of local process vs container separation.
+- Alternatives considered:
+  - *Keep dev static tokens with separate processes*: Rejected because static bearer tokens can be forged or replayed across processes without session grants.
+  - *Single shared .env file for all processes*: Rejected because all processes would inherit read access to other roles' private signing keys.
+- Trade-offs: Loopback process isolation separates process memory and environment variables, but does not provide Linux network namespaces or kernel-level filesystem isolation without root/bwrap (addressed in Phase 2).
+- Verification: 5 unit and negative tests in `backend/tests/test_local_process_isolation.py` (proves per-role key segregation, cross-role request rejection, target grant validation, and loud 502 failure on killed agents). Full test suite (284 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `npm run build` clean, and 58 frontend unit tests passed.
 
