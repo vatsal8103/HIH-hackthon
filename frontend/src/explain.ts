@@ -53,11 +53,11 @@ export function reportSummary(
             ? " That failure was an answer that did not complete a legitimate task (not a refusal), not a leak or an accepted override."
             : " Those failures were answers that did not complete a legitimate task (not refusals), not a leak or an accepted override."
           : ` Of those, ${[
-              overRefusal && `${overRefusal} ${overRefusal === 1 ? "was" : "were"} only a refusal of a legitimate request`,
-              `${incomplete} ${incomplete === 1 ? "was" : "were"} only an answer that did not complete a legitimate task`,
-            ]
-              .filter(Boolean)
-              .join("; ")}${overRefusal + incomplete === still ? "; none was a leak or an accepted override" : ""}.`;
+            overRefusal && `${overRefusal} ${overRefusal === 1 ? "was" : "were"} only a refusal of a legitimate request`,
+            `${incomplete} ${incomplete === 1 ? "was" : "were"} only an answer that did not complete a legitimate task`,
+          ]
+            .filter(Boolean)
+            .join("; ")}${overRefusal + incomplete === still ? "; none was a leak or an accepted override" : ""}.`;
   return `${first} ${added}${fixed}. ${retry}${benign}`;
 }
 
@@ -311,8 +311,7 @@ export function attackShownAtFirst(c: RunCase): boolean {
 
 /**
  * The prompt to show for a case: the one stored with its attempts (what the run actually sent), else
- * the attack library's current wording. Library wording can change later (II-04 did on 2026-10-26);
- * a run's recorded prompt never does.
+ * the attack library's current wording. Library wording can change after a run (for example, when an attack's prompt is revised); a run's recorded prompt never does.
  */
 export function recordedPrompt(c: RunCase): { text: string; recorded: boolean; differsFromLibrary: boolean } {
   const stored = c.baseline?.prompt ?? c.retest?.prompt;
@@ -320,7 +319,6 @@ export function recordedPrompt(c: RunCase): { text: string; recorded: boolean; d
     ? { text: stored, recorded: true, differsFromLibrary: stored !== c.attack.prompt }
     : { text: c.attack.prompt, recorded: false, differsFromLibrary: false };
 }
-
 /** True when the only recorded failures are refusals of legitimate requests (not leaks or overrides). */
 export const onlyOverRefusal = (failed: string[] | null): boolean =>
   Boolean(failed?.length) && failed!.every((id) => id === OVER_REFUSAL);
@@ -559,11 +557,11 @@ export function unresolvedNote(counts: ReturnType<typeof outcomeCounts>, protect
     failedCheck && (one ? "It still failed a leak, override or compliance check on the retry" : `${failedCheck} still failed a leak, override or compliance check on the retry`),
     counts.masked && (one ? "It passed the retry only because output filtering hid leaked text" : `${counts.masked} passed the retry only because output filtering hid leaked text`),
     counts.overRefusal &&
-      (one ? `It refused a legitimate request${noLeak}` : `${counts.overRefusal} refused a legitimate request`),
+    (one ? `It refused a legitimate request${noLeak}` : `${counts.overRefusal} refused a legitimate request`),
     counts.incomplete &&
-      (one
-        ? `It did not complete a legitimate task, though it did not refuse${noLeak}`
-        : `${counts.incomplete} did not complete a legitimate task, though they did not refuse`),
+    (one
+      ? `It did not complete a legitimate task, though it did not refuse${noLeak}`
+      : `${counts.incomplete} did not complete a legitimate task, though they did not refuse`),
     counts.unrecorded && (one ? "It failed the retry, but the failed check was not recorded" : `${counts.unrecorded} failed the retry without a recorded reason`),
   ].filter(Boolean);
   return `${inPlace} ${kinds.join("; ")}${!one && onlyBenign ? noLeak : ""}.`;
@@ -664,8 +662,8 @@ export function findingExplanation(
     : acted.length
       ? `On the retry, ${acted.join("; ")}.`
       : protections === 0
-      ? "No protection was added in this run, so none acted on the retry."
-      : `${plural(protections, "protection")} ${protections === 1 ? "was" : "were"} added in this run, but none acted on this attack's retry.`;
+        ? "No protection was added in this run, so none acted on the retry."
+        : `${plural(protections, "protection")} ${protections === 1 ? "was" : "were"} added in this run, but none acted on this attack's retry.`;
 
   const failedResults = (retry?.criteria ?? []).filter((r) => !r.passed && r.id !== OVER_REFUSAL);
   const passed = (retry?.criteria ?? []).filter((r) => r.passed).map((r) => passedPlain(r.id));
@@ -907,15 +905,15 @@ export function checkpointPlain(checkpoint: CheckpointVerification): { label: st
       const pending = checkpoint.unanchored_events ?? 0;
       return pending
         ? {
-            label: "Matches · newest events not yet anchored",
-            tone: "warn",
-            sentence: `Events up to #${checkpoint.anchored_seq} match the witness. The ${plural(pending, "newest event")} have no checkpoint yet, so a change to them would not be caught.`,
-          }
+          label: "Matches · newest events not yet anchored",
+          tone: "warn",
+          sentence: `Events up to #${checkpoint.anchored_seq} match the witness. The ${plural(pending, "newest event")} have no checkpoint yet, so a change to them would not be caught.`,
+        }
         : {
-            label: "Matches the witness",
-            tone: "good",
-            sentence: `All ${checkpoint.checkpoints} checkpoints match. Every event up to #${checkpoint.anchored_seq} is covered by a checkpoint.`,
-          };
+          label: "Matches the witness",
+          tone: "good",
+          sentence: `All ${checkpoint.checkpoints} checkpoints match. Every event up to #${checkpoint.anchored_seq} is covered by a checkpoint.`,
+        };
     }
     case "mismatch":
       return {
