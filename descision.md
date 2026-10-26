@@ -1138,6 +1138,20 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
   - **Local Host Firewall Scripts (`scripts/setup_firewall.sh`, `scripts/setup_firewall.ps1`)**:
     - Linux iptables owner-match rules blocking cross-agent loopback traffic (8002 <-> 8003 <-> 8004) and dropping non-loopback egress for `bayora-*` service accounts.
     - Windows Defender Firewall outbound block rules restricting cross-role loopback ports and internet egress for local service accounts.
-- Trade-offs: Without OS firewall or network namespaces applied with administrative privileges, TCP connections to loopback ports succeed at the socket layer; isolation relies on the cryptographic Ed25519 token/grant barrier. This is honestly labeled as "blocked by authentication only" rather than "blocked by OS".
 - Verification: 5 unit tests in `backend/tests/test_local_network_control.py` (proves loopback-only binding, peer barrier labeling, barrier counting in ISO-06, and loud failure on unauthenticated cross-role reach). Full test suite (297 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, and frontend unit tests passed.
+
+## 2026-10-26 — LLM-Specific Isolation & KV-Cache Protection (Phase 4)
+- Status: Active
+- Decision: Enforce shared KV-cache eviction via Ollama `keep_alive=0`, restrict Target model execution from initiating outbound requests or holding private signing keys, and enforce automated cross-session canary probes (ISO-10) and context isolation guards (ISO-09, ISO-11) with deliberate leak negative testing.
+- Reason: When evaluating LLMs on shared infrastructure, the model server itself can become a side-channel if prefix caching (KV-cache) retains state across distinct test sessions or if the target process is capable of making outbound requests to peer agents.
+- Approach chosen:
+  - **KV-Cache Eviction Configuration (`backend/app/providers.py`)**:
+    - Injected `"keep_alive": int(os.environ.get("BAYORA_OLLAMA_KEEP_ALIVE", "0"))` into all Ollama completion payloads, forcing immediate model eviction from GPU/VRAM after responding to prevent residual KV-cache cross-contamination.
+  - **Zero-Credential Target Policy (`backend/agents/target_agent.py`, `backend/app/tokens.py`)**:
+    - Target agent intentionally holds ZERO private signing keys (`BAYORA_TARGET_SIGNING_KEY` does not exist; `"target"` is excluded from `credentials.signed_roles()`).
+    - Dispatches to Target require valid CP-issued grants; missing grants return 422, forged grants return 401.
+  - **Cross-Session and Deliberate Leak Tests (`backend/tests/test_llm_isolation.py`)**:
+    - Verified negative tests: canary test with `deliberate_leak=True` catches simulated KV-cache leakage; output scanner with deliberate defense rule leaks fails loudly; cross-session context guard detects prior session text injection.
+- Trade-offs: Setting `keep_alive=0` incurs a cold-start reload penalty when testing with live local Ollama models on GPU, but guarantees complete memory isolation between test sessions. For low-latency production suites, `BAYORA_OLLAMA_KEEP_ALIVE` can be adjusted with documented security trade-offs.
+- Verification: 12 tests in `backend/tests/test_llm_isolation.py` and 61 tests in `backend/tests/test_providers.py` (proves fresh session context, canary leak detection, output isolation, advisory reporting, target credential absence, and grant validation). Full test suite (297 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, and frontend unit tests passed.
 

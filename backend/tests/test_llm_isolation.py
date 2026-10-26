@@ -132,3 +132,39 @@ def test_end_to_end_isolation_checks_include_iso_09_10_11(client):
     assert checks_by_id["ISO-10"]["status"] == "pass"
     assert checks_by_id["ISO-11"]["status"] == "pass"
     assert client.get("/api/audit/verify", headers=auth("operator")).json()["ok"] is True
+
+
+def test_target_holds_no_outbound_signing_credentials():
+    import pytest
+
+    from app import credentials, tokens
+
+    # Target is never a signed role that holds private signing credentials
+    assert "target" not in credentials.signed_roles()
+
+    # Target has no private signing key configured
+    with pytest.raises(tokens.TokenError, match="missing or malformed"):
+        tokens.private_key("BAYORA_TARGET_SIGNING_KEY")
+
+
+def test_target_unauthenticated_dispatch_rejected():
+    from fastapi.testclient import TestClient
+
+    from agents import target_agent
+
+    client = TestClient(target_agent.app)
+    # A call to /v1/respond without grant fields must be refused with 422
+    res_no_grant = client.post("/v1/respond", json={"prompt": "Hello"})
+    assert res_no_grant.status_code == 422
+
+    # A call to /v1/respond with an invalid/forged grant must be refused with 401
+    res_fake_grant = client.post(
+        "/v1/respond",
+        json={
+            "prompt": "Hello",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "grant": "forged.grant.signature",
+        },
+    )
+    assert res_fake_grant.status_code == 401
+    assert "Rejected dispatch" in res_fake_grant.json().get("detail", "")

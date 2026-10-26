@@ -99,6 +99,8 @@ class OllamaProvider:
         payload = {
             "model": self.model,
             "stream": False,
+            # Force keep_alive=0 by default to prevent Ollama from retaining in-memory KV-cache across sessions
+            "keep_alive": int(os.environ.get("BAYORA_OLLAMA_KEEP_ALIVE", "0")),
             # Reasoning models put their reasoning in a separate field when asked to think, so the
             # evaluated answer is what a user would see. Reasoning text is never evaluated or stored.
             "think": self.think,
