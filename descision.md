@@ -1076,3 +1076,11 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: Demo simulation controls run in-memory simulations without corrupting persistent database storage, ensuring the live demo can be repeated indefinitely.
 - Verification: Full backend test suite (279 passed, 12 skipped, 0 failures), `ruff check` clean, frontend `tsc --noEmit` clean, frontend production build (`npm run build`) clean, and 58 frontend unit tests passed.
 
+## 2026-10-26 — Standalone local demo runner & Docker daemon detection
+- Status: Active
+- Decision: Add `scripts/demo_local.ps1` to launch Bayora's control plane and Vite frontend in local in-process dev mode without Docker or external APIs, and update `scripts/demo.ps1` to detect Docker daemon availability before attempting `docker compose`.
+- Reason (Stated by user): Ensure the demo can be executed immediately on systems where Docker Desktop is not running, with zero external cloud APIs or API keys required.
+- Approach chosen: PowerShell automation starts backend Uvicorn server on port 8000 and Vite dev server on port 5173, opening the browser directly to `http://localhost:5173/#/demo`.
+- Trade-offs: Local mode uses SQLite and in-process role agents rather than isolated network containers, while preserving all audit chain, evaluation, and monitoring capabilities.
+- Verification: Tested in-process backend startup and Vite proxy configuration.
+
