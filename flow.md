@@ -545,10 +545,12 @@ flowchart LR
    - Control plane routes for Red and Blue (`/api/red/*`, `/api/blue/*`) pass through `timing_mitigation_middleware`.
    - `async_pad_response_time` quantizes elapsed request duration up to discrete buckets (10ms quantum default).
    - Returns header `X-Timing-Protection: quantized`, masking internal execution variance.
-3. **Container Resource Limits:**
+3. **Container & Process Resource Limits:**
    - Docker Compose enforces `pids_limit: 128`, `mem_limit: 256m`, and `cpus: 0.5` on all role containers (`x-hardened` anchor). Verified by `test_resource_fairness_and_timing_padding_compose()` in `tests_compose/test_stack.py`.
+   - On Windows in local-process mode, `sandbox.setup_windows_job_object()` assigns child processes to Job Objects for process-tree containment.
+   - In unconstrained local-process mode without Job Objects or cgroups, `fairness.evaluate_container_limits()` honestly reports `enforced: False` and `enforcement_layer: "not enforced (unconstrained host processes)"`.
 4. **Isolation Check `ISO-12`:**
-   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container limits.
+   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container/process limits with the active enforcement layer clearly disclosed.
 5. **Honest Residual Risk Documentation:**
    - Pipeline reports and isolation details explicitly document that timing side channels are reduced through response-time quantization and container resource limits, but not completely eliminated on shared host hardware.
 

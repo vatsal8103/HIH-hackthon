@@ -124,3 +124,31 @@ def test_iso12_integrated_in_isolation_run_checks(client):
     assert iso12["kind"] == "enforced"
     assert "Resource fairness & timing mitigation" in iso12["title"]
     assert "Timing side channels are reduced, not eliminated." in iso12["detail"]
+
+
+def test_container_limits_local_process_mode_reports_not_enforced(monkeypatch):
+    from app import sandbox
+
+    monkeypatch.setenv("BAYORA_MODE", "local-process")
+    monkeypatch.setattr(sandbox, "_JOB_HANDLE", None)
+    limits = fairness.evaluate_container_limits()
+    assert limits["enforced"] is False
+    assert "not enforced" in limits["enforcement_layer"]
+
+
+def test_container_limits_docker_mode_reports_docker_cgroups(monkeypatch):
+    monkeypatch.setenv("BAYORA_MODE", "docker")
+    limits = fairness.evaluate_container_limits()
+    assert limits["enforced"] is True
+    assert limits["enforcement_layer"] == "docker-cgroups"
+
+
+def test_container_limits_windows_job_object(monkeypatch):
+    from app import sandbox
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(sandbox, "_JOB_HANDLE", 12345)
+    monkeypatch.delenv("BAYORA_MODE", raising=False)
+    limits = fairness.evaluate_container_limits()
+    assert limits["enforced"] is True
+    assert limits["enforcement_layer"] == "windows-job-object"

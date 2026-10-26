@@ -10,8 +10,10 @@ Protects against resource exhaustion, performance interference, and timing leaks
 
 import math
 import os
+import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -147,11 +149,31 @@ def evaluate_target_fairness(
 
 def evaluate_container_limits(reports: dict | None = None) -> dict[str, Any]:
     """Verify resource limits (CPU, memory, pids) for containers or declared configuration."""
+    from app import sandbox
+
+    mode = os.environ.get("BAYORA_MODE")
+    in_docker = Path("/.dockerenv").exists() or mode == "docker"
+    has_job_object = sys.platform == "win32" and sandbox._JOB_HANDLE is not None
+
+    if in_docker:
+        enforcement_layer = "docker-cgroups"
+        enforced = True
+    elif has_job_object:
+        enforcement_layer = "windows-job-object"
+        enforced = True
+    elif mode == "local-process":
+        enforcement_layer = "not enforced (unconstrained host processes)"
+        enforced = False
+    else:
+        enforcement_layer = "docker-compose-policy"
+        enforced = True
+
     return {
         "cpus": CONTAINER_POLICY["cpus"],
         "mem_limit_mb": CONTAINER_POLICY["mem_limit_mb"],
         "pids_limit": CONTAINER_POLICY["pids_limit"],
-        "enforced": True,
+        "enforced": enforced,
+        "enforcement_layer": enforcement_layer,
     }
 
 
@@ -169,7 +191,8 @@ def run_fairness_check(db: DB, session_id: str) -> tuple[str, str, str, str, str
         f"Target latency under burst: {delta_desc} (threshold {fairness['threshold_pct']}%), "
         f"answers {'100% deterministic' if fairness['deterministic'] else 'NON-DETERMINISTIC'}; "
         f"Response-time quantization ({quantum}ms quantum) active on Red/Blue endpoints; "
-        f"Container limits: {limits['cpus']} CPU, {limits['mem_limit_mb']}MB RAM, {limits['pids_limit']} PIDs. "
+        f"Container limits: {limits['cpus']} CPU, {limits['mem_limit_mb']}MB RAM, {limits['pids_limit']} PIDs "
+        f"({limits['enforcement_layer']}). "
         "Timing side channels are reduced, not eliminated."
     )
 

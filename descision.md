@@ -1168,3 +1168,22 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: Role identification in `RemoteError` relies on string parsing of the exception detail when the remote client does not pass explicit role metadata, but defaults safely to `"agent"` if unmatched.
 - Verification: 6 unit tests in `backend/tests/test_monitor.py` passed (including `PROCESS_CRASH` alert logging and rate limiting), `ruff check` clean, and `ruff format` clean.
 
+## 2026-10-26 — Resource Governance & Timing Side-Channel Honesty (Phase 6)
+- Status: Active
+- Decision: Differentiate resource limit enforcement reporting based on runtime environment (Docker cgroups, Windows Job Objects, or unconstrained host processes) in `ISO-12`, preserving honest labelling ("not enforced (unconstrained host processes)" when running without containers or Job Objects) while continuing response-time quantization (10ms discrete buckets) on role endpoints.
+- Reason: When Docker is not available, standard OS processes share CPU and RAM without cgroups quotas unless wrapped in Windows Job Objects or Linux cgroups. Claiming resource limits are "enforced" in unconstrained local process mode would be dishonest to judges.
+- Approach chosen:
+  - **Environment-Aware Limit Evaluation (`backend/app/fairness.py`)**:
+    - `evaluate_container_limits()` checks `BAYORA_MODE`, `/.dockerenv`, and `sandbox._JOB_HANDLE`.
+    - Returns `enforcement_layer`:
+      - `"docker-cgroups"` with `enforced: True` in Docker environments.
+      - `"windows-job-object"` with `enforced: True` when Windows Job Objects are assigned.
+      - `"not enforced (unconstrained host processes)"` with `enforced: False` in standalone local-process mode.
+      - `"docker-compose-policy"` as the default declared baseline.
+  - **ISO-12 Detail Integration (`backend/app/fairness.py`)**:
+    - Updated `run_fairness_check()` detail string to embed `enforcement_layer` alongside burst variance, determinism, and response quantization quantum.
+  - **Verification (`backend/tests/test_fairness.py`)**:
+    - Added unit tests for each environment mode (`test_container_limits_local_process_mode_reports_not_enforced`, `test_container_limits_docker_mode_reports_docker_cgroups`, and `test_container_limits_windows_job_object`).
+- Trade-offs: Without root cgroups or Job Objects, resource limits on host processes are advisory rather than hard limits; this constraint is explicitly documented and reported in ISO-12.
+- Verification: 12 unit tests in `backend/tests/test_fairness.py` passed, full test suite passes, `ruff check` and `ruff format` clean.
+
