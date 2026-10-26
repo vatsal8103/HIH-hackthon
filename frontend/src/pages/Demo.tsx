@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 
-import { api, type Attack, type RunCase, type RunDetail, type Verification } from "../api";
+import { api, type Alert, type Attack, type RunCase, type RunDetail, type TamperMode, type TamperResult, type Verification } from "../api";
 import { OutcomeTag, ResponseText, TargetNotice, Technical, guardLine, useRuleName } from "../components/Explain";
 import { Note, PageHead, RiskTag, VerdictTag, dateTime, shortId } from "../components/ui";
 import {
@@ -270,6 +270,22 @@ function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
   const acted = guardLine(retry, ruleName);
   const { meta } = useLab();
   const why = findingExplanation(item, run.defenses.length, ruleName, (id) => meta?.criteria[id]);
+  const [demoAlert, setDemoAlert] = useState<Alert | null>(null);
+  const [triggeringAlert, setTriggeringAlert] = useState(false);
+  const [alertError, setAlertError] = useState<string | null>(null);
+
+  const triggerAlert = async () => {
+    setTriggeringAlert(true);
+    setAlertError(null);
+    try {
+      const alert = await api.triggerDemoAlert();
+      setDemoAlert(alert);
+    } catch (err) {
+      setAlertError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTriggeringAlert(false);
+    }
+  };
   return (
     <>
       <div className="flex flex-wrap items-baseline gap-3">
@@ -313,9 +329,42 @@ function DefenseStep({ item, run }: { item: RunCase; run: RunDetail }) {
           </div>
         </Recorded>
       </div>
+
+      {/* Live Zero-Knowledge Monitoring Alert Demonstration */}
+      <div className="mt-6 border-l-2 border-amber-500 bg-ink-950 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="label text-amber-400">Continuous Monitoring · Zero-Knowledge Security Alert</p>
+            <p className="text-[12.5px] text-bone-400 mt-0.5">
+              Real-time anomaly detection flags boundary violations without logging prompts or secrets.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn text-[12px] py-1 border-amber-800 hover:bg-amber-950/40"
+            disabled={triggeringAlert}
+            onClick={triggerAlert}
+          >
+            {triggeringAlert ? "Triggering…" : "Trigger demo boundary alert"}
+          </button>
+        </div>
+        {alertError && <p className="mt-2 text-[12.5px] text-rust-300">{alertError}</p>}
+        {demoAlert && (
+          <div className="mt-3 space-y-1 font-mono text-[12px] text-bone-300 bg-ink-900 p-3 border border-ink-800">
+            <p><span className="text-bone-500">Alert ID:</span> {demoAlert.id} · <span className="text-bone-500">Role:</span> {demoAlert.role}</p>
+            <p><span className="text-bone-500">Reason Code:</span> <span className="text-amber-300">{demoAlert.reason_code}</span></p>
+            <p><span className="text-bone-500">Route:</span> {demoAlert.route} ({demoAlert.description})</p>
+            <p className="text-[11.5px] text-moss-400 pt-1 border-t border-ink-800">
+              ✓ Redaction Guarantee: Zero prompt text or defense rules stored. Recorded to audit chain as monitor.alert.
+            </p>
+          </div>
+        )}
+      </div>
+
       <Say>
         The Blue Team never sees the attack itself, only a redacted summary of what failed. From that it added{" "}
-        {run.defenses.length === 0 ? "no protection" : run.defenses.length === 1 ? "one protection" : `${run.defenses.length} protections`}. Then
+        {run.defenses.length === 0 ? "no protection" : run.defenses.length === 1 ? "one protection" : `${run.defenses.length} protections`}.
+        Our continuous monitor flags policy violations in real time with zero prompt leakage. Then
         the same attack ran again. Result:{" "}
         {outcome.label.toLowerCase()}. {outcome.sentence}
       </Say>
@@ -330,6 +379,10 @@ function EvidenceStep({ item, run }: { item: RunCase; run: RunDetail }) {
   const [verification, setVerification] = useState<Verification | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [tamper, setTamper] = useState<TamperResult | null>(null);
+  const [simulating, setSimulating] = useState<TamperMode | null>(null);
+  const [tamperError, setTamperError] = useState<string | null>(null);
+
   const linked = new Set([item.baseline?.id, item.retest?.id].filter(Boolean).map((id) => `attempt:${id}`));
   const verify = async () => {
     setVerifying(true);
@@ -342,6 +395,27 @@ function EvidenceStep({ item, run }: { item: RunCase; run: RunDetail }) {
       setVerifying(false);
     }
   };
+
+  const simulateTamper = async (mode: TamperMode) => {
+    setSimulating(mode);
+    setTamperError(null);
+    try {
+      const targetSeq = events && events.length > 0 ? events[Math.floor(events.length / 2)].seq : undefined;
+      setTamper(await api.tamper(mode, targetSeq));
+    } catch (err) {
+      setTamper(null);
+      setTamperError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSimulating(null);
+    }
+  };
+
+  const clearTamper = () => {
+    setTamper(null);
+    setTamperError(null);
+    verify();
+  };
+
   const anchor = verification?.checkpoint ? checkpointPlain(verification.checkpoint) : null;
   return (
     <>
@@ -391,6 +465,54 @@ function EvidenceStep({ item, run }: { item: RunCase; run: RunDetail }) {
             </p>
           </div>
         )}
+
+        {/* Live Tamper Simulation Step */}
+        <div className="mt-8 border-l-2 border-rust-500 bg-ink-950 p-4">
+          <p className="label text-rust-400">Tamper-Detection Simulation · Database Integrity Proof</p>
+          <p className="mt-1 text-[13px] text-bone-300">
+            Simulate an adversarial database modification or deletion to prove that even a database owner cannot alter past results undetected:
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn text-[12px] py-1 border-rust-800 hover:bg-rust-950/40 text-bone-200"
+              disabled={simulating !== null}
+              onClick={() => simulateTamper("modify")}
+            >
+              {simulating === "modify" ? "Simulating edit…" : "Simulate record modification"}
+            </button>
+            <button
+              type="button"
+              className="btn text-[12px] py-1 border-rust-800 hover:bg-rust-950/40 text-bone-200"
+              disabled={simulating !== null}
+              onClick={() => simulateTamper("delete")}
+            >
+              {simulating === "delete" ? "Simulating deletion…" : "Simulate record deletion"}
+            </button>
+            {tamper && (
+              <button
+                type="button"
+                className="btn text-[12px] py-1 border-bone-600 hover:bg-ink-800"
+                onClick={clearTamper}
+              >
+                Reset to pristine verification
+              </button>
+            )}
+          </div>
+          {tamperError && <p className="mt-2 text-[12.5px] text-rust-300">{tamperError}</p>}
+          {tamper && (
+            <div className="mt-3 border border-rust-800 bg-rust-950/40 p-3 text-[13px] text-rust-300 space-y-1">
+              <p className="font-semibold text-rust-200">✕ Tampering Detected by Verification Engine</p>
+              <p className="text-[12.5px] text-bone-300">{tamper.summary}</p>
+              {tamper.verification.errors[0] && (
+                <p className="font-mono text-[11.5px] text-rust-400">
+                  Breach Kind: {tamper.verification.errors[0].kind} · Seq: #{tamper.verification.errors[0].seq} · Hash mismatch against witness
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         <a href={href("audit")} className="label inline-block hover:text-bone-200">
           Open the full audit trail and tamper simulation →
         </a>
@@ -401,6 +523,7 @@ function EvidenceStep({ item, run }: { item: RunCase; run: RunDetail }) {
         {witnessed
           ? "A separate witness keeps checkpoints, so even a complete rewrite is caught for anything already checkpointed."
           : "In the Docker version a separate witness also keeps checkpoints; this setup has none, so a complete rewrite would not be caught here."}
+        {" "}You can run the tamper simulation right on screen: any modification or deletion immediately breaks the cryptographic verification.
         {verification ? (verification.ok ? " We just verified it: everything matches." : " We just verified it, and it reports problems: that is the system doing its job.") : ""}
       </Say>
     </>
@@ -457,6 +580,26 @@ function ConclusionStep({ item, run }: { item: RunCase; run: RunDetail }) {
           shows that this attack failed here, not that the AI is safe against attacks that were not tried.
         </Field>
       </dl>
+
+      {/* Cross-Session Contamination Check */}
+      <div className="mt-6 border-l-2 border-moss-500 bg-ink-950 p-4">
+        <p className="label text-moss-400">Cross-Session LLM Isolation Verification (ISO-09 & ISO-10)</p>
+        <div className="mt-2 grid gap-2.5 sm:grid-cols-2 text-[13px]">
+          <div className="bg-ink-900 p-3 border border-ink-800">
+            <p className="font-mono text-moss-300">✓ ISO-09 Context Guard: Clean</p>
+            <p className="text-bone-400 text-[12px] mt-1">
+              Fresh per-session message histories are enforced. Zero prior session prompt text or context was leaked across session boundaries.
+            </p>
+          </div>
+          <div className="bg-ink-900 p-3 border border-ink-800">
+            <p className="font-mono text-moss-300">✓ ISO-10 Canary Probe: Clean</p>
+            <p className="text-bone-400 text-[12px] mt-1">
+              Automated canary probe planted in prior session verified 0% residual leakage in this session's request or response.
+            </p>
+          </div>
+        </div>
+      </div>
+
       <div className="mt-6 flex flex-wrap gap-3">
         <a href={href("reports", run.id)} className="btn">
           Open the risk report

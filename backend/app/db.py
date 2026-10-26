@@ -68,6 +68,13 @@ SCHEMA = [
         revoked_at TEXT NOT NULL,
         reason TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS alerts (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        role TEXT NOT NULL,
+        route TEXT NOT NULL,
+        reason_code TEXT NOT NULL
+    )""",
 ]
 
 # Serialises audit appends on PostgreSQL. An advisory lock needs no table privilege, so the

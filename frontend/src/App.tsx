@@ -9,6 +9,7 @@ import { AuditTrail } from "./pages/AuditTrail";
 import { Demo } from "./pages/Demo";
 import { HowItWorks } from "./pages/HowItWorks";
 import { IsolationLab } from "./pages/IsolationLab";
+import { Monitoring } from "./pages/Monitoring";
 import { Overview } from "./pages/Overview";
 import { Reports } from "./pages/Reports";
 import { Runs } from "./pages/Runs";
@@ -35,6 +36,8 @@ function Page({ page, id }: { page: string; id?: string }) {
       return <AttackLibrary />;
     case "isolation":
       return <IsolationLab />;
+    case "monitoring":
+      return <Monitoring />;
     case "audit":
       return <AuditTrail />;
     case "reports":

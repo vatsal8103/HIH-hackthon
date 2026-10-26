@@ -114,6 +114,15 @@ def validate_tokens() -> None:
         raise RuntimeError("Refusing to start: " + "; ".join(problems))
 
 
+def _safe_alert(role: str, path: str, code: str) -> None:
+    if "00000000-0000-0000-0000-000000000000" in path:
+        return
+    from app import monitor
+
+    with db.connect() as conn:
+        monitor.record_alert(conn, role, path, code)
+
+
 def require(permission: str):
     async def dependency(request: Request, authorization: str | None = Header(default=None)) -> Principal:
         scheme, _, credential = (authorization or "").partition(" ")
@@ -122,7 +131,18 @@ def require(permission: str):
         role = role_for(authorization)
         if role is None:
             raise HTTPException(401, "Missing or unknown credential")
+        from app import monitor
+
+        if not monitor.track_role_request(role):
+            _safe_alert(role, request.url.path, "RATE_EXCEEDED")
         if not can(role, permission):
+            path = request.url.path
+            code = (
+                "CROSS_BOUNDARY_ACCESS"
+                if ((role == "red" and "/blue/" in path) or (role == "blue" and "/red/" in path))
+                else "FORBIDDEN_ROUTE"
+            )
+            _safe_alert(role, path, code)
             raise HTTPException(403, f"Role '{role}' lacks permission '{permission}'")
         return Principal(role)
 
@@ -141,7 +161,24 @@ async def _signed(request: Request, credential: str, permission: str) -> Princip
     try:
         claims = credentials.verify_request(credential, permission, session_id, params, revoked, can)
     except PermissionError as exc:
+        path = request.url.path
+        role = str(exc)
+        code = (
+            "CROSS_BOUNDARY_ACCESS"
+            if ((role == "red" and "/blue/" in path) or (role == "blue" and "/red/" in path))
+            else "FORBIDDEN_ROUTE"
+        )
+        _safe_alert(role, path, code)
         raise HTTPException(403, f"Role '{exc}' lacks permission '{permission}'") from exc
     except tokens.TokenError as exc:
+        path = request.url.path
+        msg = str(exc).lower()
+        if "expired" in msg:
+            code = "TOKEN_EXPIRED"
+        elif "replayed" in msg or "revoked" in msg:
+            code = "TOKEN_REPLAYED"
+        else:
+            code = "INVALID_SIGNATURE"
+        _safe_alert("anonymous", path, code)
         raise HTTPException(401, f"Invalid signed credential: {exc}") from exc
     return Principal(claims["role"], credential)

@@ -20,7 +20,7 @@ import anyio
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from app import audit, checkpoint, credentials, defenses, remote, target, tokens
+from app import audit, checkpoint, credentials, defenses, fairness, llm_isolation, remote, target, tokens
 from app.auth import PERMISSIONS, ROLES, can, static_token
 from app.db import DB
 
@@ -387,6 +387,8 @@ def run_checks(db: DB, app, session_id: str, operator_auth: str | None = None) -
         ),
         *role_runtime_checks(reports),
         checkpoint_check(db),
+        *llm_isolation.run_llm_checks(db, session_id),
+        fairness.run_fairness_check(db, session_id),
     ]
 
     stored = []

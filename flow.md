@@ -9,7 +9,7 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 
 | Layer | Entry | Responsibility |
 |---|---|---|
-| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential. Hash routes: overview, `how`, `demo`, `runs`, `attacks`, `isolation`, `audit`, `reports` |
+| UI | `frontend/index.html` → `src/main.tsx` | React app. Sends no credential. Hash routes: overview, `how`, `demo`, `runs`, `attacks`, `isolation`, `audit`, `reports`, `monitoring` |
 | Plain language | `src/explain.ts` (pure, unit-tested by `src/explain.test.ts`), `src/components/Explain.tsx` | Turns recorded run data into plain outcome labels, stage states and results, risk and checkpoint wording, and the target notice. Never adds facts the data lacks |
 | Edge relay | Docker only: `frontend/relay.conf` (nginx stream, Dockerfile target `relay`) | Holds the published loopback port and forwards raw TCP to `frontend:8080` over `ui_net`. Holds no credential and parses no HTTP |
 | Edge proxy | Docker: `frontend/nginx.conf.template` (nginx-unprivileged, target `app`, internal networks only). Dev: `frontend/vite.config.ts` proxy | Answers only `Host` 127.0.0.1 or localhost (nginx 421 otherwise; Vite 403). Injects the operator token server-side, replacing any client `Authorization` header. Refuses `/api/(red\|blue\|target)/` (nginx 403, Vite 404). nginx adds anti-framing, `nosniff` and `no-referrer` headers |
@@ -22,7 +22,8 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 | Remote | `backend/app/remote.py` | Outbound HTTP to agents and the witness. Failures raise `RemoteError`, never fall back |
 | Role agents | `backend/agents/{red,blue,target}_agent.py`, `common.py` | Docker only. Each accepts a dispatch only with a valid control-plane grant, and Red/Blue sign every API request with their own key. The target holds no API credential |
 | Simulation | `attacks.py`, `target.py`, `providers.py`, `defenses.py`, `evaluator.py` | Test cases, the target behind a provider interface (deterministic simulator by default, optional live Ollama model, §2.9), guardrails, criteria |
-| Isolation | `backend/app/isolation.py` | Permission probes, data checks, and network and container checks reported by the agents |
+| Isolation | `backend/app/isolation.py`, `backend/app/llm_isolation.py`, `backend/app/fairness.py` | Permission probes, data checks, LLM cross-session context/canary guards, resource fairness & timing mitigations, and network and container checks reported by the agents |
+| Monitoring | `backend/app/monitor.py` | Real-time security alerts (coarse reasons, strictly redacted), sliding-window rate limiting, role burst tracking, audit-chain event logging |
 | Audit | `backend/app/audit.py` | Hash-chain append, verification, tamper simulation |
 | Checkpoint | `backend/app/checkpoint.py` → `backend/witness/app.py`, `backend/witness/recover.py` | Publishes the chain head with an extension proof after commits; verifies the chain against the witness log. Operator recovery appends `supersede` records |
 | Storage | `backend/app/db.py` | SQLite (default) or PostgreSQL (`DATABASE_URL`) |
@@ -147,11 +148,10 @@ Residual: a compromised Red agent that submits an attack outside the session's l
 | respond | `_respond`: `defenses.run_target(prompt, rules, model)`, where `model` calls `provider.respond_with_metadata` | Same guardrails in the control plane; `model` = `call_agent("target", "/v1/respond", {prompt})`, which returns `{response, provider, kind, metadata}`. A reply without a string `response` → `RemoteError`; `metadata` is re-filtered by `providers.safe_metadata` | `target.baseline_response` (response SHA-256, guard fields, `provider`, `provider_kind`, `target_runtime`, and since 2026-10-26 `provider_metadata` {finish_reason, token counts} when the provider reported any; reset per prompt, absent for the simulator and blocked prompts) |
 | evaluate | `_evaluate` (always in the control plane): `evaluator.evaluate(response, attack.criteria, attack.task)`. Since 2026-10-26 checks normalise text, match known values in alternate forms and bounded Base64, recognise common refusal openers, and use `task` signals for over-refusal (II-04) | Same | `evaluator.baseline_verdict` |
 | defend | `blue_findings()` → `PLAYBOOK` → `apply_defense` | `call_agent("blue", "/v1/act", {session_id})`. The Blue agent GETs `/api/blue/sessions/{id}/findings` and POSTs `/defenses` per criterion in its own `PLAYBOOK` | `blue.findings_read` (in-process: stage; agent: Blue API route, `via: api`), `blue.defense_applied` per rule |
-| retest | `submit_attempt(retest)` per case, then respond and evaluate | Red agent `/v1/act` with `phase: retest` (the Red API allows retest only while the stage is `defend`), `_require_submitted`, then respond (target agent) and evaluate | `red.retest_submitted`, `target.retest_response`, `evaluator.retest_verdict` |
-| isolation | `isolation.run_checks` (§3) | Same, plus agent probes | `isolation.check` ×8 |
+| isolation | `isolation.run_checks` (§3) | Same, plus agent probes and LLM isolation checks | `isolation.check` ×11, `isolation.llm_check` |
 | report | `stage_report`: residual risk per case, counts, isolation summary (`enforced`, `network`, `configured`, `simulated`, `planned`), `audit.verify` plus `checkpoint.verify` (both taken *before* the report event), `deployment` (role modes and the provider recorded on the latest target event), disclaimer chosen by mode | Same | `report.generated` |
 
-A full seven-case run appends **56 events**; ISO-05 sees 47 of them. Both were measured in-process and in a Docker agent-mode run, which records exactly one `blue.findings_read`, the Blue agent's. Before the security review it was 57, because ISO-02 itself read through the Blue API (finding V3).
+A full seven-case run appends **60 events** (including the three LLM isolation checks: ISO-09, ISO-10, ISO-11 and diagnostic event `isolation.llm_check`); ISO-05 sees 47 of them.
 
 In agent mode every dispatch goes through `pipeline.dispatch(role, path, session_id, actions, payload)`, which adds a fresh control-plane grant (§2.6). Red and Blue role actions carry the role-signed token into the audit event details as `credential`.
 
@@ -249,13 +249,36 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 6. When the loop ends, `playing` and `busy` clear, and the scene shows the final recorded state.
 7. Other pages refetch on `version`. Run detail prefers `lab.run` while the run is active.
 
+### 2.6 Public Safety Benchmarks & Attack Selection Flow
+1. **Attack Definitions (`app/attacks.py`)**:
+   - `CORE_ATTACKS`: The 7 pristine synthetic clinic attacks (`BN-00` through `PR-06`).
+   - `IMPORTED_ATTACKS`: 25 public benchmark attacks loaded at startup from `app/data/imported_attacks.json` (Lakera Gandalf, JailbreakBench, AdvBench, HarmBench).
+   - `ALL_ATTACKS`: Core attacks decorated with source/license/category metadata + imported attacks (total 32 attacks).
+   - `BY_ID`: An `AttackRegistry(dict)` that routes iteration to `DEFAULT_ATTACK_IDS` (core 7) for baseline suite stability, while supporting indexing and membership lookups across all 32 attacks.
+2. **Run Dispatch (`POST /api/runs`)**:
+   - If `body.attack_ids` is omitted, the run defaults to `DEFAULT_ATTACK_IDS` (`["BN-00", ..., "PR-06"]`).
+   - If the operator selects specific imported benchmarks (e.g., `["GD-01", "JB-03"]`), `main.py` validates each ID against `BY_ID`, instantiates test cases only for the requested attacks, and executes them through the full pipeline.
+3. **Execution & Evaluation**:
+   - Red executes the attacks in the specified order.
+   - Target evaluates each attack through either the live provider or the deterministic simulator (with broadened regex heuristics for injection and secret extraction).
+   - Evaluator verifies criteria compliance (`no-secret-disclosure`, `instruction-hierarchy`, `refuse-disallowed`, `no-over-refusal`).
+   - Results are cryptographically signed and anchored to the witness chain.
+4. **UI Attack Library (`frontend/src/pages/AttackLibrary.tsx`)**:
+   - Fetches all attacks via `GET /api/attacks`.
+   - Offers multi-dimensional filtering by benchmark Source (`All Sources`, `Bayora Core`, `Lakera Gandalf`, `JailbreakBench`, `AdvBench`, `HarmBench`) and Category.
+   - Displays technique badges, source links, and open-source licenses.
+
 ### 2.7 Guided demo (`#/demo`, `pages/Demo.tsx`)
 1. `GET /api/attacks` once. The selected case defaults to `PI-01` (its first attempt fails in the seeded catalogue, so every step has content); the presenter can pick another.
 2. The data source is `lab.run`, the latest run. A step after step 2 renders only if that run has a report and contains the case. Otherwise `NeedsRun` states the exact reason: loading, failed to load, no runs, latest run unfinished, or latest run lacks the case. It offers **Run <id> now** (`lab.start([id])`), **Resume** for an unfinished run, or **Back to step 2**; while busy it shows the live step. Each step is labelled with its kind: explains, can start a test, shows recorded data, or read-only check.
 3. Step 2's **Start a new saved test with <id>** (also offered by `NeedsRun`) calls `lab.start([id])`: the normal `POST /api/runs` plus advance loop. This adds a session and audit events; nothing is deleted. Since 2026-10-26 a warning (`CreatesRecord`) says so before the button, including that a live Groq target receives the prompt; the step list (`explain.DEMO_STEPS`) marks step 2 "Can start a new saved test" and step 5 "Read-only check".
 4. Steps 3 and 4 read the case's `baseline` and `retest` attempts, the run's `defenses`, `guardLine` and `caseOutcome`. Step 5 loads `GET /api/audit?session_id=<run>&limit=1000` and marks entries whose `evidence_ref` is one of the case's attempts. **Verify** calls `GET /api/audit/verify` (read-only) and words the witness result with `checkpointPlain`. Step 6 reads the report, `isolationCounts` and the case residual.
 5. The "Say this" text at each step is built from the same data. Witness sentences depend on `meta.deployment.checkpoint`.
-6. Since 2026-10-26: recorded data is framed as "Recorded evidence · run <id>" (`Recorded`), apart from the suggested words; step 3 adds each failed check's severity from `meta.criteria`; step 4 states the protection that acted from `findingExplanation`; step 5 says a passing verification is not a guarantee; step 6 answers "Did the retry improve?" with `explain.retryImprovement` (credits a protection only when one acted on a passing retry). Step 1 no longer repeats the role architecture; it links to `#/how`.
+7. Since 2026-10-26: recorded data is framed as "Recorded evidence · run <id>" (`Recorded`), apart from the suggested words; step 3 adds each failed check's severity from `meta.criteria`; step 4 states the protection that acted from `findingExplanation`; step 5 says a passing verification is not a guarantee; step 6 answers "Did the retry improve?" with `explain.retryImprovement` (credits a protection only when one acted on a passing retry). Step 1 no longer repeats the role architecture; it links to `#/how`.
+8. **Demo Polish Enhancements (2026-10-26)**:
+   - **Step 4 (Defense)**: Adds a live zero-knowledge continuous monitoring demo trigger (`api.triggerDemoAlert`). Presenters demonstrate real-time alert generation (`DEMO_VIOLATION`) with 100% payload redaction.
+   - **Step 5 (Evidence)**: Adds an interactive tamper-detection simulation panel (`api.tamper`) allowing live simulation of record modification or deletion, immediately demonstrating failed SHA-256 hash continuity and witness mismatch.
+   - **Step 6 (Conclusion)**: Adds an explicit Cross-Session LLM Isolation Verification card detailing `ISO-09` context guard and `ISO-10` canary probe status.
 
 `#/how` (`pages/HowItWorks.tsx`) reads only `meta`: target, role modes, the witness setting, and the full control register with details. The register is shown here once; the Isolation lab links to it. How it works makes no verification call; the live status is on the Audit trail.
 
@@ -264,6 +287,22 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
 - **API client:** `api.ts` checks each response's shape (a list where a list is expected; a run with id, stage, cases, defenses and isolation; a verification with a boolean `ok`). An unexpected 200 becomes an `ApiError`, never empty data. A proxy 502–504 without a JSON `detail` reads "The Bayora API is not answering".
 - **Lab:** the initial load sets `runLoad` to `failed` and shows the error instead of swallowing it. The error banner has **Dismiss**. A second start while busy is ignored (`busyRef`); tested with a double click.
 - **Audit trail:** `GET /api/audit/verify` runs when the page opens and after every run. A failed request clears any earlier result and shows "Verification could not run". **Verify again** replays the link walk. Tamper simulations are locked while one is in flight, so results cannot arrive out of order.
+
+### 2.9 Threat Model & Residual Risk Reporting Flow
+1. **Model Source (`docs/THREAT_MODEL.md`)**:
+   - Single source of truth specifying security boundaries, 11 evaluated threats, honest status tags (`Implemented`, `Partial`, `Simulated`, `Planned`), failure boundaries, and automated test linkages.
+2. **Control Plane Route (`GET /api/threat-model`)**:
+   - Invoked with `runs:read` permission.
+   - Reads `docs/THREAT_MODEL.md` from filesystem.
+   - Returns structured JSON containing raw markdown and parsed array of threats with fields: `threat`, `status`, `how`, `failure_mode`, `test`, `future`.
+3. **Frontend Rendering (`pages/Reports.tsx`)**:
+   - Top-level sub-navigation offers dual modes: "Run Report Document" (for completed execution runs) and "Architecture Threat Model".
+   - Threat Model view presents:
+     - Real-time metrics breakdown (total threats, implemented, partial, disclaimed).
+     - Status filter toggle buttons.
+     - Interactive matrix table with color-coded status badges, failure modes, and clickable test linkages.
+     - Side-by-side architectural guarantees vs real-world physical and host limitations.
+     - Collapsible raw specification disclosure.
 - **Test runs:** a loading state, whole-row selection (the id link remains the keyboard path), and an explained error with a way back for an unknown run id. A run's isolation checks appear as a summary, with the full list in a disclosure.
 - **Risk reports:** the report shown must match the selected id (`run.id === selectedId`). A failed run list or report load is shown as an error. A run without a report says so and links to resume it.
 - **Isolation lab:** "expected" (permission table) before probing and "observed" after. Each role shows the credential its probes used, and a role with no credential is expected to be refused everywhere.
@@ -342,7 +381,12 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
    - If all three agents are configured: for each role, `call_agent(role, "/v1/probe", {})`. The agent probes its fixed `PROBE_TARGETS` (compose service names plus TEST-NET-1 `192.0.2.1`) with a 1.5 s TCP connect, and reads `/proc/self/status` (uid, CapEff, NoNewPrivs), a write probe on `/`, and whether `/var/run/docker.sock` exists.
    - `evaluate_probe` compares reachability with `NETWORK_POLICY` (each role → `control-plane` only; "refused" counts as reachable) → ISO-06 `network`. `ollama-proxy` is in every agent's probe list: Red and Blue reaching it is a violation; for the target it is an optional path (`OPTIONAL_PATHS`), present only in Live AI mode. `evaluate_security` → ISO-07 `configured`. An agent that doesn't answer fails both checks: fail closed.
 6. **`checkpoint_check()`** → ISO-08: `enforced` when a witness is configured (`checkpoint.verify`), else `planned`.
-7. Inserts 8 rows and appends `isolation.check` ×8. All probes run before any local write in this stage.
+7. **`llm_isolation.run_llm_checks()`:**
+   - **ISO-09 (enforced):** LLM cross-session context guard. Confirms fresh message history per session and ensures no earlier session's text or private artifacts are sent in later requests.
+   - **ISO-10 (enforced):** LLM cross-session canary isolation. Plants a unique random canary string in session A's scenario context and asserts zero residue in session B's output.
+   - **ISO-11 (enforced):** LLM output isolation & KV-cache protection. Scans target responses to ensure no Blue defense rules or cross-attack prompt fragments appear; verifies per-request stateless invocation and records that shared model servers' internal KV caches are outside local container control.
+   - Records diagnostic event `isolation.llm_check` to the audit chain.
+8. Inserts 11 rows and appends `isolation.check` ×11. All probes run before any local write in this stage.
 
 **Isolation lab page:** `POST /api/isolation/matrix` runs the same 40 probes on demand.
 
@@ -412,6 +456,73 @@ The agents' probe results are self-reported by Bayora's own code. Independent pr
 | Witness head conflicts with the local chain, or a far-future record exists (legacy, or written to the volume) | Publish returns `rejected` and posts nothing; verify fails | Operator: `docker compose exec witness .venv/bin/python -m witness.recover status`, then `supersede --from-index N --expect-head-seq S --reason "…"`. Publishing resumes from the last checkpoint still in force. The superseded records stay; verify still fails, with kind `superseded` and the reason | `tests/test_witness_recovery.py`, compose `test_witness_recovery_…` |
 
 What it detects: edits, deletions, reordering and truncation anywhere up to the latest checkpoint, including a full rewrite with recomputed hashes made with the database owner's credentials (tested in Docker from a one-off `migrate` container; the backend's own role is refused). What it does not detect: changes confined to events after the latest checkpoint (normally at most one stage), or truncation of the witness log's own tail.
+
+### 5.4 Continuous monitoring and anomaly detection
+
+```mermaid
+flowchart TD
+    Req[Incoming HTTP Request] --> Auth[auth.require / auth._signed]
+    Auth -- 403 Forbidden --> Alert[monitor.record_alert]
+    Auth -- 401 Signature Fail / Replay / Expiry --> Alert
+    Auth -- Cross-Boundary Role Access --> Alert
+    Auth -- Role Burst >30 req/5s --> Alert
+    Alert --> DB[(alerts table: id, ts, role, route, coarse reason, status)]
+    Alert --> Audit[audit.append: monitor.alert]
+    Operator[Operator UI #/monitoring] -- GET /api/alerts: rate limited 60/min --> API[main.py: get_alerts]
+    API --> AlertView[Redacted Alert Log: Zero prompts / Zero defense rules]
+```
+
+1. **Trigger Points:**
+   - Permission verification in `auth.require()` triggers `FORBIDDEN_ROUTE` on 403.
+   - Cross-boundary detection in `auth.require()` triggers `CROSS_BOUNDARY_ACCESS` when Red accesses `/api/blue/` or Blue accesses `/api/red/`.
+   - Signed token verification in `auth._signed()` triggers `INVALID_SIGNATURE`, `TOKEN_REPLAYED`, or `TOKEN_EXPIRED`.
+   - Request burst tracking in `monitor.record_role_request()` triggers `RATE_EXCEEDED` if a single role exceeds 30 requests in 5 seconds.
+   - Interactive verification via `POST /api/alerts/demo` triggers `DEMO_VIOLATION` for live demonstrations.
+2. **Strict Redaction Guarantee:**
+   - Stored alert schema records only `id`, `ts`, `role`, `route`, `reason`, and coarse metadata (`status_code`, `method`, `via`).
+   - Attack prompts, payload arguments, defense rules, and bearer tokens are never captured or recorded in alert data.
+3. **Audit Trail Recording:**
+   - Every recorded alert issues an append-only event `monitor.alert` to `audit.py`.
+4. **Anti-Flooding Rate Limiting:**
+   - `GET /api/alerts` enforces an in-memory sliding window rate limiter (max 60 requests/minute per client IP).
+5. **Operator Dashboard:**
+   - Frontend `Monitoring.tsx` renders violation cards by role and a live log table with coarse reason badges.
+
+### 5.5 Resource fairness and timing side-channel mitigations
+
+```mermaid
+flowchart LR
+    subgraph Client [Red / Blue Role Requests]
+        RReq[Request to /api/red/* or /api/blue/*]
+    end
+    subgraph ControlPlane [FastAPI Control Plane]
+        TPM[timing_mitigation_middleware]
+        Handler[Route Handler Logic]
+        Pad[fairness.async_pad_response_time]
+    end
+    subgraph IsolationLab [ISO-12 Evaluation]
+        Burst[evaluate_target_fairness]
+        Limits[evaluate_container_limits]
+    end
+    RReq --> TPM --> Handler --> Pad --> Res[Quantized Response + X-Timing-Protection]
+    Burst -- Latency delta <= 20% & 100% Deterministic --> ISO12[ISO-12: pass]
+    Limits -- CPU 0.5, Mem 256MB, Pids 128 --> ISO12
+```
+
+1. **Target Latency & Determinism Under Burst:**
+   - `evaluate_target_fairness()` measures baseline response latency and answers against Target (`target.model`).
+   - Executes a rapid burst of requests, computing latency variance delta percentage against baseline.
+   - Asserts that latency delta stays within 20% threshold (`LATENCY_THRESHOLD_PCT`) and all burst responses match baseline answer 100% deterministically.
+2. **Response-Time Quantization:**
+   - Control plane routes for Red and Blue (`/api/red/*`, `/api/blue/*`) pass through `timing_mitigation_middleware`.
+   - `async_pad_response_time` quantizes elapsed request duration up to discrete buckets (10ms quantum default).
+   - Returns header `X-Timing-Protection: quantized`, masking internal execution variance.
+3. **Container Resource Limits:**
+   - Docker Compose enforces `pids_limit: 128`, `mem_limit: 256m`, and `cpus: 0.5` on all role containers (`x-hardened` anchor). Verified by `test_resource_fairness_and_timing_padding_compose()` in `tests_compose/test_stack.py`.
+4. **Isolation Check `ISO-12`:**
+   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container limits.
+5. **Honest Residual Risk Documentation:**
+   - Pipeline reports and isolation details explicitly document that timing side channels are reduced through response-time quantization and container resource limits, but not completely eliminated on shared host hardware.
 
 ## 6. Error handling summary
 | Where | Behaviour |

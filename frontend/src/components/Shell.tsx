@@ -11,6 +11,7 @@ export const NAV = [
   { path: "runs", label: "Test runs" },
   { path: "attacks", label: "Attack library" },
   { path: "isolation", label: "Isolation lab" },
+  { path: "monitoring", label: "Monitoring" },
   { path: "audit", label: "Audit trail" },
   { path: "reports", label: "Risk reports" },
 ];

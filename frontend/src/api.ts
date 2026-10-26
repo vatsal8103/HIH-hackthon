@@ -16,6 +16,10 @@ export interface Attack {
   prompt: string;
   criteria: string[];
   recommendation: string;
+  category?: string;
+  source?: string;
+  source_url?: string;
+  license?: string;
 }
 
 export interface CriterionResult {
@@ -178,6 +182,25 @@ export interface CheckpointPublish {
   error?: string;
 }
 
+export interface Alert {
+  id: string;
+  created_at: string;
+  role: string;
+  route: string;
+  reason_code: string;
+  description: string;
+}
+
+export interface AlertsResponse {
+  alerts: Alert[];
+  counts: {
+    total: number;
+    by_role: Record<string, number>;
+    by_reason: Record<string, number>;
+  };
+  reason_codes: Record<string, string>;
+}
+
 export interface Verification {
   ok: boolean;
   checked: number;
@@ -282,9 +305,26 @@ async function checked<T>(response: Promise<unknown>, valid: Check, what: string
   return value as T;
 }
 
+export interface ThreatItem {
+  threat: string;
+  protected: boolean;
+  status: "Implemented" | "Partial" | "Simulated / Disclaimed" | "Planned" | string;
+  how: string;
+  failure_mode: string;
+  test: string;
+  future: string;
+}
+
+export interface ThreatModelResponse {
+  markdown: string;
+  threats: ThreatItem[];
+}
+
 export const api = {
   meta: () => checked<Meta>(request("/api/meta"), isRecord("stages", "criteria", "rules", "controls", "deployment"), "metadata response"),
   attacks: () => checked<Attack[]>(request("/api/attacks"), isList, "attack list"),
+  threatModel: () =>
+    checked<ThreatModelResponse>(request("/api/threat-model"), isRecord("markdown", "threats"), "threat model response"),
   runs: () => checked<RunSummary[]>(request("/api/runs"), isList, "run list"),
   run: (id: string) => checked<RunDetail>(request(`/api/runs/${encodeURIComponent(id)}`), isRun, "run"),
   createRun: (attackIds?: string[]) =>
@@ -315,4 +355,8 @@ export const api = {
   tamper: (mode: TamperMode, seq?: number) =>
     checked<TamperResult>(post("/api/audit/tamper-test", { mode, seq }), isRecord("verification", "summary"), "simulation result"),
   probeMatrix: () => checked<ProbeRow[]>(post("/api/isolation/matrix"), isList, "probe matrix"),
+  alerts: (limit = 100) =>
+    checked<AlertsResponse>(request(`/api/alerts?limit=${limit}`), isRecord("alerts", "counts"), "alerts response"),
+  triggerDemoAlert: () =>
+    checked<Alert>(post("/api/alerts/demo"), isRecord("id", "role", "route", "reason_code"), "demo alert result"),
 };

@@ -83,6 +83,11 @@ Create test → Red Team attack → Target response → Safety evaluation → Bl
 | Hash-linked audit log (edits, deletions, reordering, evidence drift) | **Implemented** | Unit tests with real database tampering |
 | External audit checkpoint (witness service) with extension proofs | **Implemented** (Docker; optional in dev) | Rewrite, truncation, deletion, outage, far-future and forged-proof tests, including a full owner rewrite in Docker |
 | Witness recovery that never deletes (append-only `supersede` records; verification stays red) | **Implemented** (Docker) | Unit tests and the CLI run inside the witness container |
+| LLM cross-session context guard & canary probe (`ISO-09`, `ISO-10`, `ISO-11`) | **Implemented** (dev + Docker) | Unit tests (`test_llm_isolation.py`); fresh message history per session; deliberate leak negative tests |
+| Continuous monitoring & zero-knowledge security alerts | **Implemented** (dev + Docker) | `GET /api/alerts`; coarse redacted reason codes; rate limiting; unit tests (`test_monitor.py`) |
+| Resource fairness & response-time quantization (`ISO-12`) | **Partial** (dev + Docker) | 10ms padding middleware; `evaluate_target_fairness`; container limits; host core pinning planned |
+| Public safety benchmark attacks (Gandalf, JailbreakBench, AdvBench, HarmBench) | **Implemented** | 25 imported cases with sources/licenses; `scripts/import_attacks.py`; library UI filters; unit tests |
+| Architecture threat model & residual risk reporting | **Implemented** | `docs/THREAT_MODEL.md`; `GET /api/threat-model`; Risk reports tabbed UI; unit tests |
 | Target model | **Simulated** by default; **live** model via Ollama (local) or Groq (hosted) when configured (Live AI mode) | Provider tests with mocked Ollama and Groq; real two-attack runs in Docker through `ollama-proxy` and `groq-proxy` |
 | Blue Team agent | **Simulated**: a fixed playbook from violated criterion to rule | |
 | Per-user operator identity; shared jti cache across API restarts | **Planned** | |
