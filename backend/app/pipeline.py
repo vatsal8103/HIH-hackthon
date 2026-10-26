@@ -559,7 +559,11 @@ def _disclaimer(agents: dict, kind: str | None, provider: str | None = None) -> 
             "Some roles ran inside the control-plane process, so isolation checks for those roles test "
             "application-layer permissions only, not OS, container or network isolation."
         )
-    return f"{target} {scope}"
+    timing = (
+        "Timing side channels are reduced via response-time quantization and container resource limits, "
+        "but not completely eliminated on shared host hardware."
+    )
+    return f"{target} {scope} {timing}"
 
 
 STAGE_HANDLERS = {

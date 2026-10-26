@@ -22,7 +22,7 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 | Remote | `backend/app/remote.py` | Outbound HTTP to agents and the witness. Failures raise `RemoteError`, never fall back |
 | Role agents | `backend/agents/{red,blue,target}_agent.py`, `common.py` | Docker only. Each accepts a dispatch only with a valid control-plane grant, and Red/Blue sign every API request with their own key. The target holds no API credential |
 | Simulation | `attacks.py`, `target.py`, `providers.py`, `defenses.py`, `evaluator.py` | Test cases, the target behind a provider interface (deterministic simulator by default, optional live Ollama model, §2.9), guardrails, criteria |
-| Isolation | `backend/app/isolation.py`, `backend/app/llm_isolation.py` | Permission probes, data checks, LLM cross-session context/canary guards, and network and container checks reported by the agents |
+| Isolation | `backend/app/isolation.py`, `backend/app/llm_isolation.py`, `backend/app/fairness.py` | Permission probes, data checks, LLM cross-session context/canary guards, resource fairness & timing mitigations, and network and container checks reported by the agents |
 | Monitoring | `backend/app/monitor.py` | Real-time security alerts (coarse reasons, strictly redacted), sliding-window rate limiting, role burst tracking, audit-chain event logging |
 | Audit | `backend/app/audit.py` | Hash-chain append, verification, tamper simulation |
 | Checkpoint | `backend/app/checkpoint.py` → `backend/witness/app.py`, `backend/witness/recover.py` | Publishes the chain head with an extension proof after commits; verifies the chain against the witness log. Operator recovery appends `supersede` records |
@@ -448,6 +448,42 @@ flowchart TD
    - `GET /api/alerts` enforces an in-memory sliding window rate limiter (max 60 requests/minute per client IP).
 5. **Operator Dashboard:**
    - Frontend `Monitoring.tsx` renders violation cards by role and a live log table with coarse reason badges.
+
+### 5.5 Resource fairness and timing side-channel mitigations
+
+```mermaid
+flowchart LR
+    subgraph Client [Red / Blue Role Requests]
+        RReq[Request to /api/red/* or /api/blue/*]
+    end
+    subgraph ControlPlane [FastAPI Control Plane]
+        TPM[timing_mitigation_middleware]
+        Handler[Route Handler Logic]
+        Pad[fairness.async_pad_response_time]
+    end
+    subgraph IsolationLab [ISO-12 Evaluation]
+        Burst[evaluate_target_fairness]
+        Limits[evaluate_container_limits]
+    end
+    RReq --> TPM --> Handler --> Pad --> Res[Quantized Response + X-Timing-Protection]
+    Burst -- Latency delta <= 20% & 100% Deterministic --> ISO12[ISO-12: pass]
+    Limits -- CPU 0.5, Mem 256MB, Pids 128 --> ISO12
+```
+
+1. **Target Latency & Determinism Under Burst:**
+   - `evaluate_target_fairness()` measures baseline response latency and answers against Target (`target.model`).
+   - Executes a rapid burst of requests, computing latency variance delta percentage against baseline.
+   - Asserts that latency delta stays within 20% threshold (`LATENCY_THRESHOLD_PCT`) and all burst responses match baseline answer 100% deterministically.
+2. **Response-Time Quantization:**
+   - Control plane routes for Red and Blue (`/api/red/*`, `/api/blue/*`) pass through `timing_mitigation_middleware`.
+   - `async_pad_response_time` quantizes elapsed request duration up to discrete buckets (10ms quantum default).
+   - Returns header `X-Timing-Protection: quantized`, masking internal execution variance.
+3. **Container Resource Limits:**
+   - Docker Compose enforces `pids_limit: 128`, `mem_limit: 256m`, and `cpus: 0.5` on all role containers (`x-hardened` anchor). Verified by `test_resource_fairness_and_timing_padding_compose()` in `tests_compose/test_stack.py`.
+4. **Isolation Check `ISO-12`:**
+   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container limits.
+5. **Honest Residual Risk Documentation:**
+   - Pipeline reports and isolation details explicitly document that timing side channels are reduced through response-time quantization and container resource limits, but not completely eliminated on shared host hardware.
 
 ## 6. Error handling summary
 | Where | Behaviour |

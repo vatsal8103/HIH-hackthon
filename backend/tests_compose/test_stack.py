@@ -755,3 +755,12 @@ def test_groq_key_lives_only_in_the_hardened_proxy(groq_proxy):
     }
     target_env = " ".join(inspect("target")["Config"]["Env"])
     assert SECRETS["GROQ_API_KEY"] not in target_env and "BAYORA_GROQ_AUTH=proxy" in target_env
+
+
+def test_resource_fairness_and_timing_padding_compose():
+    for service in ("red-agent", "blue-agent", "target"):
+        host = inspect(service)["HostConfig"]
+        assert host["PidsLimit"] == 128
+        assert host["Memory"] == 256 * 1024 * 1024
+        assert host["NanoCpus"] == 500_000_000
+

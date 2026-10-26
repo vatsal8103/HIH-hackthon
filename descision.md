@@ -1005,3 +1005,16 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
   - **Operator UI**: Created `#/monitoring` in the frontend with role breakdown cards, a live alerts table with color-coded severity badges, and a "Trigger demo violation" action for live judge demonstrations.
 - Trade-offs: Alert detail is intentionally coarse to eliminate any risk of prompt leakage to unauthorized observers.
 - Verification: 5 new unit tests in `backend/tests/test_monitor.py` (forbidden call detection, zero secret text, audit chain recording, operator-only access, rate limiting). Full backend suite (261 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, and 57 frontend unit tests passed.
+
+## 2026-10-26 — Resource fairness and timing side-channel mitigation (Part 3)
+- Status: Active
+- Decision: Add `backend/app/fairness.py`, response-time quantization middleware in `backend/app/main.py`, container resource limits test in `backend/tests_compose/test_stack.py`, and integrate isolation check `ISO-12` into `backend/app/isolation.py`.
+- Reason (Stated by user): Show that heavy load or timing differences from one team cannot distort another team's results or leak information.
+- Approach chosen:
+  - **Target Load Burst Test**: Evaluates Target latency and answer determinism under burst load (`evaluate_target_fairness`). Asserts that latency delta stays within a 20% threshold (`LATENCY_THRESHOLD_PCT`) and answers remain 100% deterministic with baseline answers.
+  - **Response-Time Padding**: Implemented sync (`pad_response_time`) and async (`async_pad_response_time`) functions that quantize elapsed execution time to discrete buckets (10ms quantum default). Added `timing_mitigation_middleware` to control plane routes called by Red and Blue (`/api/red/*`, `/api/blue/*`), emitting `X-Timing-Protection: quantized`.
+  - **Container Resource Bounds**: Verified CPU (0.5), memory (256MB), and PIDs limit (128) configuration in Compose (`x-hardened` anchor) and added outside-in verification in `tests_compose/test_stack.py`.
+  - **Isolation Lab Integration (`ISO-12`)**: Added `ISO-12` ("Resource fairness & timing mitigation") to the isolation suite as an enforced check.
+  - **Honest Disclaimer**: Transparently updated reports and isolation detail to state: "Timing side channels are reduced via response-time quantization and container resource limits, but not completely eliminated on shared host hardware."
+- Trade-offs: Response-time quantization adds up to 10ms padding on role requests; host microarchitectural contention cannot be fully eliminated without dedicated physical cores.
+- Verification: 9 unit tests in `backend/tests/test_fairness.py` (fairness evaluation, latency threshold breach failure, non-deterministic answer failure, sync & async padding, role route headers, container limits, ISO-12 integration). Full backend suite passing (270 passed, 12 skipped), `ruff check` clean, `tsc --noEmit` clean, 57 frontend tests passed.

@@ -28,7 +28,7 @@ def test_full_simulated_workflow(client):
     assert report["audit"]["ok"] is True
     # In-process roles: application checks pass; network and container checks are not claimed.
     isolation = report["isolation"]
-    assert (isolation["enforced_pass"], isolation["enforced_fail"]) == (8, 0)
+    assert (isolation["enforced_pass"], isolation["enforced_fail"]) == (9, 0)
     assert (isolation["simulated"], isolation["planned"]) == (1, 2)
     assert isolation["network_pass"] == isolation["configured_pass"] == 0
     assert report["deployment"]["roles"] == {

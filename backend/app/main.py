@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from app import (
     db,
     defenses,
     evaluator,
+    fairness,
     isolation,
     monitor,
     pipeline,
@@ -221,6 +223,18 @@ async def refuse_cross_site_writes(request: Request, call_next):
         if site in ("cross-site", "same-site") or foreign_origin:
             return JSONResponse(status_code=403, content={"detail": "Cross-site request refused"})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def timing_mitigation_middleware(request: Request, call_next):
+    """Mitigate timing side channels on role routes (Red & Blue) via response-time quantization."""
+    is_role_route = request.url.path.startswith("/api/red/") or request.url.path.startswith("/api/blue/")
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    if is_role_route:
+        await fairness.async_pad_response_time(t0)
+        response.headers["X-Timing-Protection"] = "quantized"
+    return response
 
 
 @app.exception_handler(pipeline.Conflict)
