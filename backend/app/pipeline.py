@@ -52,7 +52,12 @@ def create_session(db: DB, attack_ids: list[str]) -> str:
         (session_id, audit.now(), json.dumps(attack_ids)),
     )
     audit.append(
-        db, session_id, "operator", "session.created", f"session:{session_id}", {"attack_ids": attack_ids}
+        db,
+        session_id,
+        "operator",
+        "session.created",
+        f"session:{session_id}",
+        {"attack_ids": attack_ids, "mode": os.environ.get("BAYORA_MODE", "in-process")},
     )
     return session_id
 

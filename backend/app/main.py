@@ -1,7 +1,9 @@
 """Bayora API. Every route declares the single permission it needs (see auth.PERMISSIONS)."""
 
 import json
+import logging
 import os
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,11 +34,30 @@ from app.auth import PERMISSIONS, Principal, require, validate_tokens
 
 
 def deployment() -> dict:
+    from app import sandbox
+
     agents = {role: "agent" if remote.agent_url(role) else "in-process" for role in remote.AGENT_ENV}
+    mode = os.environ.get("BAYORA_MODE")
+    if not mode:
+        if Path("/.dockerenv").exists():
+            mode = "docker"
+        elif any(remote.agent_url(role) for role in remote.AGENT_ENV):
+            mode = "local-process"
+        else:
+            mode = "in-process"
+    os_caps = sandbox.detect_os_capabilities()
     return {
+        "mode": mode,
         "roles": agents,
         "checkpoint": "witness" if checkpoint.configured() else "not-configured",
         "credentials": "signed" if credentials.signed_roles() else "static",
+        "os_isolation": {
+            "platform": os_caps["platform"],
+            "sandbox": os_caps["sandbox_tool"],
+            "strength": os_caps["strength"],
+            "summary": os_caps["summary"],
+            "details": os_caps["details"],
+        },
     }
 
 
@@ -147,18 +168,36 @@ def controls(target: dict | None = None) -> list[dict]:
         {
             "name": "Per-role container isolation",
             "status": "implemented" if isolated else "planned",
-            "detail": "Red, Blue and Target run as separate non-root, read-only agent containers holding only "
-            "their own credential."
-            if isolated
-            else f"Not active here: {', '.join(in_process)} run inside the control-plane process. The Docker "
-            "stack runs them as separate containers.",
+            "detail": (
+                "Red, Blue and Target run as separate non-root, read-only agent containers holding only their own credential."
+                if isolated and deployment().get("mode") == "docker"
+                else (
+                    f"Red, Blue and Target run as separate OS processes on 127.0.0.1 with {deployment().get('os_isolation', {}).get('summary', 'process isolation')} and isolated per-role credentials."
+                    if isolated and deployment().get("mode") == "local-process"
+                    else (
+                        "Red, Blue and Target run as separate isolated agents."
+                        if isolated
+                        else f"Not active here: {', '.join(in_process)} run inside the control-plane process. The Docker stack runs them as separate containers."
+                    )
+                )
+            ),
         },
         {
             "name": "Role network segmentation",
             "status": "implemented" if isolated else "simulated",
-            "detail": "One internal Docker network per role path; probed from inside each role container."
-            if isolated
-            else "Declared model only in this deployment.",
+            "detail": (
+                "One internal Docker network per role path; probed from inside each role container."
+                if isolated and deployment().get("mode") == "docker"
+                else (
+                    "Loopback isolation (127.0.0.1) per agent port; cross-role calls rejected by Ed25519 grant verification."
+                    if isolated and deployment().get("mode") == "local-process"
+                    else (
+                        "One internal network per role path; probed from inside each role container."
+                        if isolated
+                        else "Declared model only in this deployment."
+                    )
+                )
+            ),
         },
         {
             "name": "Operator credential kept out of the browser",
@@ -249,9 +288,21 @@ def provider_handler(_request: Request, exc: providers.ProviderError):
     return JSONResponse(status_code=502, content={"detail": f"Target provider failure: {exc}"})
 
 
+logger = logging.getLogger(__name__)
+
+
 @app.exception_handler(remote.RemoteError)
 def remote_handler(_request: Request, exc: remote.RemoteError):
     # The stage's transaction has rolled back; nothing was done in-process instead.
+    msg = str(exc).lower()
+    role = (
+        "red" if "red" in msg else ("blue" if "blue" in msg else ("target" if "target" in msg else "agent"))
+    )
+    try:
+        with db.connect() as conn:
+            monitor.record_alert(conn, role, _request.url.path, "PROCESS_CRASH")
+    except (sqlite3.Error, OSError, RuntimeError) as alert_err:
+        logger.warning("Failed to record crash alert: %s", alert_err)
     return JSONResponse(status_code=502, content={"detail": f"Role service failure: {exc}"})
 
 
@@ -404,19 +455,46 @@ def get_threat_model(_role: str = Depends(require("runs:read"))):
                 "threat": "Audit log tampering (including DB owner rewrite)",
                 "protected": True,
                 "status": "Implemented",
-                "how": "Cryptographic SHA-256 hash chaining of all events; independent witness checkpoint service on dedicated network (ISO-08); DB role bayora_app denied UPDATE/DELETE.",
-                "failure_mode": "Simultaneous compromise of both PostgreSQL database and witness log volume.",
-                "test": "backend/tests/test_checkpoint.py, backend/tests_compose/test_stack.py::test_full_chain_rewrite_detected",
+                "how": "Cryptographic SHA-256 hash chaining of all events; independent witness checkpoint service on dedicated network (ISO-08); DB role bayora_app denied UPDATE/DELETE; standalone offline verifier (scripts/verify_audit.py).",
+                "failure_mode": "Simultaneous compromise of both PostgreSQL/SQLite database and witness log volume.",
+                "test": "backend/tests/test_checkpoint.py, backend/tests/test_verify_audit.py",
                 "future": "Multi-witness Byzantine threshold consensus; public ledger transparency anchoring.",
             },
             {
                 "threat": "Container escape via shared kernel",
                 "protected": False,
                 "status": "Partial",
-                "how": "Hardened container profiles: cap_drop: ALL, no-new-privileges: true, non-root user (nobody), custom seccomp profile, read-only root filesystems (ISO-07).",
+                "how": "Hardened container profiles: cap_drop: ALL, no-new-privileges: true, non-root user (nobody), custom seccomp profile, read-only root filesystems (ISO-07). In non-container mode: Linux bubblewrap namespaces or Windows Job Objects.",
                 "failure_mode": "0-day host Linux kernel privilege escalation exploit (e.g. dirty COW, eBPF bug).",
-                "test": "backend/tests_compose/test_stack.py::test_container_capabilities_and_security_options",
+                "test": "backend/tests_compose/test_stack.py::test_container_capabilities_and_security_options, backend/tests/test_os_sandboxing.py",
                 "future": "Hardware virtualization microVM isolation (AWS Firecracker, gVisor runsc, Kata).",
+            },
+            {
+                "threat": "Host filesystem cross-contamination in non-container mode",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Local setup generates separate .run/<role> runtime directories with 0700/0600 DACLs; child agent runners scrub foreign role environment variables; Linux bubblewrap mounts only own role directory.",
+                "failure_mode": "Malicious agent process executing with root/superuser privileges overriding local filesystem permissions.",
+                "test": "backend/tests/test_local_process_isolation.py, backend/tests/test_os_sandboxing.py::test_file_isolation_verification",
+                "future": "Mandatory Access Control policies (SELinux / AppArmor profiles).",
+            },
+            {
+                "threat": "Unauthenticated cross-role loopback reach",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Local agents bind strictly to loopback (127.0.0.1); peer dispatches strictly require CP-issued signed session grants; empirical barrier probes classify network boundaries (ISO-06); host firewall scripts.",
+                "failure_mode": "Misconfigured firewall allowing direct loopback socket connections with compromised private key.",
+                "test": "backend/tests/test_local_network_control.py, backend/tests/test_local_process_isolation.py::test_cross_role_direct_request_rejected",
+                "future": "Kernel-level network namespaces (ip netns) for unprivileged processes.",
+            },
+            {
+                "threat": "Target model outbound exfiltration",
+                "protected": True,
+                "status": "Implemented",
+                "how": "Target agent holds ZERO private signing keys; excluded from credentials.signed_roles(); target only answers inbound requests carrying valid CP grants; non-loopback egress dropped.",
+                "failure_mode": "Target model code modified to inject outbound socket calls before grant verification.",
+                "test": "backend/tests/test_llm_isolation.py::test_target_holds_no_outbound_signing_credentials",
+                "future": "Outbound socket syscall restriction via seccomp filter.",
             },
             {
                 "threat": "Timing & resource side channels",

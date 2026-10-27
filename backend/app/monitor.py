@@ -29,6 +29,7 @@ REASON_CODES = {
     "TOKEN_REPLAYED": "Token replayed, reused jti, or revoked key id",
     "TOKEN_EXPIRED": "Token expired or presented outside valid time window",
     "RATE_EXCEEDED": "Unusual request burst rate from role",
+    "PROCESS_CRASH": "Role agent process terminated, crashed, or unreachable (502)",
     "DEMO_VIOLATION": "Simulated cross-boundary violation for live demonstration",
 }
 
@@ -132,7 +133,9 @@ def check_alerts_rate_limit(max_requests: int = 60, window_seconds: float = 60.0
         _ALERTS_ENDPOINT_CALLS.popleft()
 
     if len(_ALERTS_ENDPOINT_CALLS) >= max_requests:
-        raise HTTPException(status_code=429, detail="Alerts query rate limit exceeded (coarse side-channel mitigation)")
+        raise HTTPException(
+            status_code=429, detail="Alerts query rate limit exceeded (coarse side-channel mitigation)"
+        )
 
     _ALERTS_ENDPOINT_CALLS.append(now)
 

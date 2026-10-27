@@ -85,3 +85,21 @@ def test_alerts_endpoint_rate_limiting(client, monkeypatch):
     assert limited.status_code == 429
     assert "rate limit exceeded" in limited.json()["detail"].lower()
     monitor._ALERTS_ENDPOINT_CALLS.clear()
+
+
+def test_remote_failure_records_process_crash_alert(agents, client):
+    from unittest.mock import patch
+
+    from app import remote
+
+    res = client.post("/api/runs", json={"attack_ids": ["BN-00"]}, headers=auth("operator"))
+    run_id = res.json()["id"]
+
+    with patch("app.remote.call_agent", side_effect=remote.RemoteError("red agent unreachable")):
+        advance_res = client.post(f"/api/runs/{run_id}/advance", headers=auth("operator"))
+        assert advance_res.status_code == 502
+
+    alerts_res = client.get("/api/alerts", headers=auth("operator")).json()
+    crash_alerts = [a for a in alerts_res["alerts"] if a["reason_code"] == "PROCESS_CRASH"]
+    assert len(crash_alerts) >= 1
+    assert crash_alerts[0]["role"] == "red"

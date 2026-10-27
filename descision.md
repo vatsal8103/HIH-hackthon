@@ -1076,3 +1076,201 @@ Follows the read-only investigation of run `6326f879` (II-04 refused twice by `g
 - Trade-offs: Demo simulation controls run in-memory simulations without corrupting persistent database storage, ensuring the live demo can be repeated indefinitely.
 - Verification: Full backend test suite (279 passed, 12 skipped, 0 failures), `ruff check` clean, frontend `tsc --noEmit` clean, frontend production build (`npm run build`) clean, and 58 frontend unit tests passed.
 
+## 2026-10-26 — Standalone local demo runner & Docker daemon detection
+- Status: Active
+- Decision: Add `scripts/demo_local.ps1` to launch Bayora's control plane and Vite frontend in local in-process dev mode without Docker or external APIs, and update `scripts/demo.ps1` to detect Docker daemon availability before attempting `docker compose`.
+- Reason (Stated by user): Ensure the demo can be executed immediately on systems where Docker Desktop is not running, with zero external cloud APIs or API keys required.
+- Approach chosen: PowerShell automation starts backend Uvicorn server on port 8000 and Vite dev server on port 5173, opening the browser directly to `http://localhost:5173/#/demo`.
+- Trade-offs: Local mode uses SQLite and in-process role agents rather than isolated network containers, while preserving all audit chain, evaluation, and monitoring capabilities.
+## 2026-10-26 — Real OS process isolation without Docker (Phase 1)
+- Status: Active
+- Decision: Replace in-process dev roles with real, independent OS processes using loopback binding (127.0.0.1) and segregated per-role secret directories (.run/) with strict permissions (0o600 for files, 0o700 for directories). Introduce `BAYORA_MODE=local-process` to govern runtime behavior.
+- Reason: When Docker is unavailable on a host machine, running all roles inside a single Python process permits memory and secret cross-contamination. Real process isolation guarantees independent address spaces, per-process environment segregation, and enforces genuine asymmetric Ed25519 request signing.
+- Approach chosen:
+  - **Isolated Secret Management (`backend/app/local_setup.py`)**: Provisions dedicated per-role directories (`.run/cp`, `.run/red`, `.run/blue`, `.run/target`, `.run/witness`, `.run/frontend`) with mode 600/700 permissions. The Target agent holds NO private signing key (only CP public key). Each agent's environment receives strictly its own key.
+  - **Process Runner (`backend/app/agent_runner.py`)**: Launches a specified role agent with clean environment scrubbing, injecting only its isolated config from `.run/<role>/env.json` and binding to dedicated loopback ports (CP: 8000, Witness: 8001, Red: 8002, Blue: 8003, Target: 8004).
+  - **Dynamic Loopback Probe Targets (`backend/agents/common.py`)**: Dynamically resolves probe targets to loopback ports in local-process mode while preserving Docker compose service names in docker mode.
+  - **Runtime Mode Awareness (`backend/app/main.py`, `backend/app/isolation.py`)**: Exposes `BAYORA_MODE` ("local-process", "in-process", "docker") via `/api/meta`. Updates `ISO-06` (network segmentation on loopback with authentication barrier) and `ISO-07` (process-level isolation with PID tracking and per-role keys).
+  - **One-Command Runners (`scripts/run_local.ps1`, `scripts/run_local.sh`)**: Orchestrates automated secret provisioning, process startup, health polling across all 5 backend services, frontend proxy startup, and clean child process termination.
+  - **Frontend UI (`api.ts`, `HowItWorks.tsx`, `IsolationLab.tsx`)**: Displays active mode badge and honest explanations of local process vs container separation.
+- Alternatives considered:
+  - *Keep dev static tokens with separate processes*: Rejected because static bearer tokens can be forged or replayed across processes without session grants.
+  - *Single shared .env file for all processes*: Rejected because all processes would inherit read access to other roles' private signing keys.
+- Trade-offs: Loopback process isolation separates process memory and environment variables, but does not provide Linux network namespaces or kernel-level filesystem isolation without root/bwrap (addressed in Phase 2).
+- Verification: 5 unit and negative tests in `backend/tests/test_local_process_isolation.py` (proves per-role key segregation, cross-role request rejection, target grant validation, and loud 502 failure on killed agents). Full test suite (284 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `npm run build` clean, and 58 frontend unit tests passed.
+
+## 2026-10-26 — OS-Level Sandboxing & Isolation Detection (Phase 2)
+- Status: Active
+- Decision: Add native OS-level sandboxing detection and optional enforcement layers (Linux bubblewrap, firejail, dedicated OS service accounts, Windows Job Objects) with honest labeling ("OS-level", "process-level", "cryptographic", "simulated", "planned"). Never claim "secure" or "safe".
+- Reason: While local process isolation (Phase 1) separates memory and environment variables, discretionary filesystem access control and unprivileged namespace containment further restrict unauthorized cross-role file inspection and enforce clean child cleanup on host systems without Docker.
+- Approach chosen:
+  - **OS Sandboxing Detection & Wrapping (`backend/app/sandbox.py`)**:
+    - Auto-detects available host isolation primitives: Linux `bwrap` (bubblewrap unprivileged user/mount/pid namespaces), `firejail`, separate OS users (`bayora-cp`, `bayora-red`, `bayora-blue`, `bayora-target`, `bayora-witness`), and Windows Job Objects API (via 64-bit `ctypes` with `wintypes.HANDLE` bindings).
+    - `build_sandbox_command(role, cmd, run_dir)`: wraps execution in bubblewrap (`--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-user --unshare-ipc --unshare-pid --unshare-uts --bind .run/<role> .run/<role>`) or firejail where present, or defaults to direct process-level execution with honest labeling.
+    - `setup_windows_job_object()`: on Windows, creates a Job Object and assigns the current process to guarantee containment and process-tree cleanup.
+    - `verify_file_isolation(accessor, target, run_dir)`: programmatic probe testing whether an accessor role can read another role's `env.json` secrets.
+  - **Runner Integration (`backend/app/agent_runner.py`)**:
+    - Automatically wraps child agent processes in detected sandbox (`bwrap`/`firejail`) using `os.execvpe` when `BAYORA_SANDBOX_ACTIVE` is unset, and assigns Windows Job Objects on Windows hosts.
+  - **Control Plane & Audit Exposure (`backend/app/main.py`, `backend/app/isolation.py`)**:
+    - `deployment()` returns `os_isolation` schema with `platform`, `sandbox`, `strength`, `summary`, and `details`.
+    - `ISO-07` in `role_runtime_checks()` reports the exact detected OS isolation layer and strength.
+  - **Dedicated Service Account Provisioning (`scripts/setup_users.sh`, `scripts/setup_users.ps1`)**:
+    - Scripts to provision unprivileged system accounts (`bayora-cp`, `bayora-red`, `bayora-blue`, `bayora-target`, `bayora-witness`) and configure 0700/0600 POSIX permissions or Windows `icacls` DACLs on `.run/<role>`.
+  - **Frontend UI (`api.ts`, `HowItWorks.tsx`, `IsolationLab.tsx`)**:
+    - Updated type definitions and rendered badges/notes with the detected OS sandbox summary and real strength.
+- Verification: 8 tests in `backend/tests/test_os_sandboxing.py` covering capability schema, command wrapping for bubblewrap and firejail, filesystem permission verification, API metadata exposure, ISO-07 reporting, and Windows Job Object assignment. Full backend test suite (292 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, frontend `tsc --noEmit` clean, `npm run build` clean, and 58 frontend unit tests passed.
+
+## 2026-10-26 — Local Network Control and Barrier Probing (Phase 3)
+- Status: Active
+- Decision: Enforce strict loopback binding (127.0.0.1) across all services, provide host firewall rule templates for Linux (iptables) and Windows (NetFirewallRule), and enhance agent reachability probes with honest barrier categorization ("blocked by OS", "blocked by authentication only", "reachable", or "authorized path").
+- Reason: On shared loopback without containers, TCP ports are reachable by other local processes unless firewall rules or network namespaces are installed. Accurately distinguishing between physical/OS packet blocks and application-level cryptographic authentication barriers ensures that security guarantees are never exaggerated to judges or operators.
+- Approach chosen:
+  - **Empirical Barrier Classification (`backend/agents/common.py`)**:
+    - `check_peer_barrier(name, host, port, tcp_outcome)`:
+      - If TCP connect fails (refused, timeout, unreachable, dns): categorized as `"blocked by OS"`.
+      - If TCP connect succeeds to a peer agent (`red-agent`, `blue-agent`, `target`, `witness`): tests unauthenticated dispatch (`/v1/act`). When rejected (401/403/422), categorized as `"blocked by authentication only"`.
+      - If peer answers without authentication (< 400): categorized as `"reachable"` (flagged as an isolation violation).
+      - If target is control-plane: categorized as `"authorized path"`.
+    - `probe()` embeds `barrier` attribute in each reachability item.
+  - **Dynamic ISO-06 Evaluation (`backend/app/isolation.py`)**:
+    - Aggregates empirical barrier counts: reports number of targets blocked by OS vs blocked by authentication only.
+    - Fails loudly with `outcome="fail"` if any unauthenticated peer cross-role reach is detected.
+  - **Local Host Firewall Scripts (`scripts/setup_firewall.sh`, `scripts/setup_firewall.ps1`)**:
+    - Linux iptables owner-match rules blocking cross-agent loopback traffic (8002 <-> 8003 <-> 8004) and dropping non-loopback egress for `bayora-*` service accounts.
+    - Windows Defender Firewall outbound block rules restricting cross-role loopback ports and internet egress for local service accounts.
+- Verification: 5 unit tests in `backend/tests/test_local_network_control.py` (proves loopback-only binding, peer barrier labeling, barrier counting in ISO-06, and loud failure on unauthenticated cross-role reach). Full test suite (297 passed, 12 skipped, 0 failures), `ruff check` clean, `ruff format` clean, and frontend unit tests passed.
+
+## 2026-10-26 — LLM-Specific Isolation & KV-Cache Protection (Phase 4)
+- Status: Active
+- Decision: Enforce shared KV-cache eviction via Ollama `keep_alive=0`, restrict Target model execution from initiating outbound requests or holding private signing keys, and enforce automated cross-session canary probes (ISO-10) and context isolation guards (ISO-09, ISO-11) with deliberate leak negative testing.
+- Reason: When evaluating LLMs on shared infrastructure, the model server itself can become a side-channel if prefix caching (KV-cache) retains state across distinct test sessions or if the target process is capable of making outbound requests to peer agents.
+- Approach chosen:
+  - **KV-Cache Eviction Configuration (`backend/app/providers.py`)**:
+    - Injected `"keep_alive": int(os.environ.get("BAYORA_OLLAMA_KEEP_ALIVE", "0"))` into all Ollama completion payloads, forcing immediate model eviction from GPU/VRAM after responding to prevent residual KV-cache cross-contamination.
+  - **Zero-Credential Target Policy (`backend/agents/target_agent.py`, `backend/app/tokens.py`)**:
+    - Target agent intentionally holds ZERO private signing keys (`BAYORA_TARGET_SIGNING_KEY` does not exist; `"target"` is excluded from `credentials.signed_roles()`).
+    - Dispatches to Target require valid CP-issued grants; missing grants return 422, forged grants return 401.
+  - **Cross-Session and Deliberate Leak Tests (`backend/tests/test_llm_isolation.py`)**:
+    - Verified negative tests: canary test with `deliberate_leak=True` catches simulated KV-cache leakage; output scanner with deliberate defense rule leaks fails loudly; cross-session context guard detects prior session text injection.
+- Trade-offs: Setting `keep_alive=0` incurs a cold-start reload penalty when testing with live local Ollama models on GPU, but guarantees complete memory isolation between test sessions. For low-latency production suites, `BAYORA_OLLAMA_KEEP_ALIVE` can be adjusted with documented security trade-offs.
+## 2026-10-26 — Continuous Monitoring & Role Crash Alerting (Phase 5)
+- Status: Active
+- Decision: Add `PROCESS_CRASH` reason code to continuous monitoring subsystem, and hook `remote.RemoteError` exceptions in the FastAPI control plane to automatically record role failure alerts with audit provenance before returning 502 status.
+- Reason: In non-container local process execution, child agents can terminate unexpectedly, run out of memory, or be halted by host signals. Logging these events in the tamper-evident audit monitor guarantees immediate visibility to operators without needing container orchestrator events.
+- Approach chosen:
+  - **Reason Code Registration (`backend/app/monitor.py`)**:
+    - Added `"PROCESS_CRASH": "Role agent process terminated, crashed, or unreachable (502)"` to `REASON_CODES`.
+  - **Exception Handler Hook (`backend/app/main.py`)**:
+    - In `@app.exception_handler(remote.RemoteError)`, parsed failing role name from error context and recorded a `PROCESS_CRASH` alert in the audit log via `monitor.record_alert()` before returning HTTP 502.
+    - Handled potential DB/IO logging errors gracefully with fallback logger warnings so the 502 response is never obstructed.
+  - **Verification (`backend/tests/test_monitor.py`)**:
+    - Added `test_remote_failure_records_process_crash_alert` testing mock agent crash (`RemoteError`), verifying 502 HTTP response, and asserting that `GET /api/alerts` surfaces the `PROCESS_CRASH` alert for the failed role.
+- Trade-offs: Role identification in `RemoteError` relies on string parsing of the exception detail when the remote client does not pass explicit role metadata, but defaults safely to `"agent"` if unmatched.
+- Verification: 6 unit tests in `backend/tests/test_monitor.py` passed (including `PROCESS_CRASH` alert logging and rate limiting), `ruff check` clean, and `ruff format` clean.
+
+## 2026-10-26 — Resource Governance & Timing Side-Channel Honesty (Phase 6)
+- Status: Active
+- Decision: Differentiate resource limit enforcement reporting based on runtime environment (Docker cgroups, Windows Job Objects, or unconstrained host processes) in `ISO-12`, preserving honest labelling ("not enforced (unconstrained host processes)" when running without containers or Job Objects) while continuing response-time quantization (10ms discrete buckets) on role endpoints.
+- Reason: When Docker is not available, standard OS processes share CPU and RAM without cgroups quotas unless wrapped in Windows Job Objects or Linux cgroups. Claiming resource limits are "enforced" in unconstrained local process mode would be dishonest to judges.
+- Approach chosen:
+  - **Environment-Aware Limit Evaluation (`backend/app/fairness.py`)**:
+    - `evaluate_container_limits()` checks `BAYORA_MODE`, `/.dockerenv`, and `sandbox._JOB_HANDLE`.
+    - Returns `enforcement_layer`:
+      - `"docker-cgroups"` with `enforced: True` in Docker environments.
+      - `"windows-job-object"` with `enforced: True` when Windows Job Objects are assigned.
+      - `"not enforced (unconstrained host processes)"` with `enforced: False` in standalone local-process mode.
+      - `"docker-compose-policy"` as the default declared baseline.
+  - **ISO-12 Detail Integration (`backend/app/fairness.py`)**:
+    - Updated `run_fairness_check()` detail string to embed `enforcement_layer` alongside burst variance, determinism, and response quantization quantum.
+  - **Verification (`backend/tests/test_fairness.py`)**:
+    - Added unit tests for each environment mode (`test_container_limits_local_process_mode_reports_not_enforced`, `test_container_limits_docker_mode_reports_docker_cgroups`, and `test_container_limits_windows_job_object`).
+- Trade-offs: Without root cgroups or Job Objects, resource limits on host processes are advisory rather than hard limits; this constraint is explicitly documented and reported in ISO-12.
+- Verification: 12 unit tests in `backend/tests/test_fairness.py` passed, full test suite passes, `ruff check` and `ruff format` clean.
+
+## 2026-10-26 — Standalone Offline Audit Verifier & Evidence Bundle Export (Phase 7)
+- Status: Active
+- Decision: Provide a standalone offline CLI tool (`scripts/verify_audit.py`) that opens the SQLite database in URI read-only mode, independently validates the cryptographic SHA-256 hash chain, checks evidence digests against attempt records, verifies external witness checkpoint alignment, and exports an evidence bundle JSON without running the FastAPI application.
+- Reason: Audit integrity must be verifiable by outside auditors or judges who cannot trust a running application server to report on its own integrity. An independent, zero-dependency offline verifier guarantees empirical proof of tamper detection.
+- Approach chosen:
+  - **Standalone Verifier Script (`scripts/verify_audit.py`)**:
+    - Opens database file with `sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)` preventing any accidental database writes.
+    - Validates genesis hash (`GENESIS = "0" * 64`), strict sequence increments, and per-event canonical SHA-256 hash links across `HASHED_FIELDS`.
+    - Verifies attempt evidence references (`attempt:<id>`) against stored prompt, response, and verdict digests.
+    - Optional `--witness-log <path>` compares local chain head hashes against external witness checkpoint records.
+    - Optional `--export <path>` exports a standardized `bayora-audit-evidence-bundle-v1` JSON structure with full events and referenced attempt/defense records.
+    - Returns exit code 0 on verified integrity, exit code 1 on tamper detection or missing records.
+  - **Automated Tamper Detection Tests (`backend/tests/test_verify_audit.py`)**:
+    - Tested valid session run verification and evidence bundle export.
+    - Tested tampering with event details (catches hash mismatch).
+    - Tested deleting an event (catches sequence break and broken prev_hash link).
+    - Tested tampering with attempt prompt in SQLite (catches prompt digest mismatch).
+    - Tested tampering with witness checkpoint head hash (catches witness divergence).
+- Trade-offs: The standalone script uses Python standard library only (`sqlite3`, `hashlib`, `json`, `argparse`, `pathlib`) for maximum portability across any auditor machine.
+- Verification: 5 unit and negative tamper tests in `backend/tests/test_verify_audit.py` passed, `ruff check` and `ruff format` clean.
+
+## 2026-10-26 — Public Safety Benchmarks & Full Lifecycle Verification (Phase 8)
+- Status: Active
+- Decision: Validate public safety benchmark integration (Gandalf, JailbreakBench, AdvBench, HarmBench) across the 32 attack definitions, confirming that attacks with distinct safety criteria (`no-secret-disclosure`, `instruction-hierarchy`, `refuse-disallowed`, `no-pii-disclosure`) execute through the entire 7-stage pipeline (attack -> respond -> evaluate -> defend -> retest -> isolation -> report) with consistent verdict scoring, defense rule generation, and audit integrity in local-process mode.
+- Reason: The red-teaming lab must evaluate real adversarial tactics from published literature rather than only toy examples, while proving that role isolation and audit guarantees hold equally across diverse benchmarks.
+- Approach chosen:
+  - **Attack Catalogue Validation (`backend/app/attacks.py`, `scripts/import_attacks.py`)**:
+    - Validated 7 core clinic attacks (`BN-00` to `BN-06`) plus 25 imported benchmark definitions (`GD-*`, `JB-*`, `AB-*`, `HB-*`) across prompt injection, jailbreak prefixing, harmful requests, and persona escapes.
+  - **Full Lifecycle Integration Testing (`backend/tests/test_imported_attacks.py`)**:
+    - Added `test_imported_attacks_full_lifecycle` testing a session configured with imported benchmarks (`GD-01`, `JB-03`, `AB-01`).
+    - Verified execution across all 7 stages to `report`, confirming case counts, defense mitigation, and `report["audit"]["ok"] is True`.
+- Verification: 7 unit tests in `backend/tests/test_imported_attacks.py` passed, `ruff check` and `ruff format` clean.
+
+## 2026-10-26 — Threat Model Update for Non-Container Process Isolation (Phase 9)
+- Status: Active
+- Decision: Update `docs/THREAT_MODEL.md` and the `GET /api/threat-model` endpoint to formally model both Docker container stacks and non-container local-process architectures, documenting host filesystem cross-contamination risks (`.run/<role>` DACLs), unauthenticated cross-role loopback reach, and target model outbound exfiltration protections.
+- Reason: The threat model must honestly capture the security boundaries and residual risks of non-container execution without claiming that local processes provide hypervisor-grade isolation.
+- Approach chosen:
+  - **Architecture Documentation (`docs/THREAT_MODEL.md`)**:
+    - Added comprehensive diagram and textual specification contrasting container bridge networks against local loopback architecture (ports 8000–8004, bubblewrap namespaces, firejail, service accounts, and Windows Job Objects).
+  - **Threat Matrix Additions (`docs/THREAT_MODEL.md`, `backend/app/main.py`)**:
+    - "Host filesystem cross-contamination in non-container mode": documented 0700/0600 file DACLs, scrubbed environment variables, and sandbox mounts.
+    - "Unauthenticated cross-role loopback reach": documented loopback binding, signed grant verification on peer endpoints, and host firewall barriers.
+    - "Target model outbound exfiltration": documented zero-credential target policy and non-loopback egress drops.
+    - Updated "Audit log tampering" to include standalone offline verification (`scripts/verify_audit.py`).
+  - **Endpoint Synchronization (`backend/app/main.py`)**:
+    - Synchronized `/api/threat-model` structured JSON return with the expanded threat matrix.
+  - **Automated Verification (`backend/tests/test_threat_model.py`)**:
+    - Validated that all required threat topics are present in documentation and served by the API.
+- Verification: 3 tests in `backend/tests/test_threat_model.py` passed, full test suite clean, frontend builds cleanly.
+
+## 2026-10-26 — Demo Script and Presentation Polish for No-Docker Architecture (Phase 10)
+- Status: Active
+- Decision: Update `docs/DEMO_SCRIPT.md` with an explicit 3-minute judge presentation script and Top 6 Q&As centered on non-container process isolation, OS sandboxing, loopback packet control, and offline audit verification. Update `README.md` with execution instructions for offline audit verification (`scripts/verify_audit.py`), host firewalls, and service accounts.
+- Reason: Clear, concise presentation guidance ensures the engineering team demonstrates the exact judging objectives (isolation without Docker, side-channel mitigation, and audit integrity) within strict hackathon judging time constraints.
+- Approach chosen:
+  - **3-Minute Presentation Script (`docs/DEMO_SCRIPT.md`)**:
+    - [0:00–0:45] The Problem & The Architecture (Track 4 focus, 6 independent processes on 127.0.0.1:8000..8004, .run/<role> 0700/0600 permissions, OS sandboxing).
+    - [0:45–1:30] Execution, Evaluation & Zero-Knowledge Defense (target holds zero signing keys, Blue sees redacted failure codes, instruction-guard defense).
+    - [1:30–2:15] Continuous Monitoring & Cryptographic Witness Verification (live violation alert, PROCESS_CRASH audit alert, SHA-256 chain, witness verification).
+    - [2:15–3:00] Offline Verification, Isolation Probes & Honest Threat Model (ISO-06 empirical barriers, ISO-07 sandbox strength, standalone offline verifier, 14-threat matrix).
+  - **Top 6 Judge Q&As (`docs/DEMO_SCRIPT.md`)**:
+    - Q1: Real isolation without Docker or virtualization.
+    - Q2: Cross-role filesystem and memory protection.
+    - Q3: Cross-role loopback connection barriers.
+    - Q4: Standalone offline audit verifier proofs.
+    - Q5: KV-cache eviction and model side-channels.
+    - Q6: Deterministic simulation alongside live LLM providers.
+  - **Documentation & Instructions (`README.md`)**:
+    - Documented `scripts/verify_audit.py` offline verification CLI and evidence export.
+    - Documented host firewall scripts (`setup_firewall.sh`, `setup_firewall.ps1`) and dedicated service account scripts (`setup_users.sh`, `setup_users.ps1`).
+- Verification: Validated markdown syntax, links, and command examples across `docs/DEMO_SCRIPT.md` and `README.md`.
+
+## 2026-10-27: Unified `main.py` launcher at project root
+
+- **Date:** 2026-10-27
+- **Decision:** Create a single `main.py` at the project root that starts both the FastAPI backend (port 8000) and the Vite frontend dev server (port 5173) as subprocesses.
+- **Rationale:** User requested a one-command startup. Previously required two terminals.
+- **Approach:**
+  - Loads `.env` with a simple parser (no `python-dotenv` dependency).
+  - Auto-installs deps (`uv sync`, `npm install`) if `.venv` or `node_modules` are missing.
+  - Forces UTF-8 stdout on Windows to avoid cp1252 encoding errors.
+  - All output uses ASCII-only characters (no emoji/Unicode box-drawing) for Windows compatibility.
+  - Graceful shutdown via `taskkill /F /T` on Windows, `os.killpg` on Unix.
+  - Supports `--back` (backend only) and `--front` (frontend only) flags.
+- **Files:** `main.py` (project root).
+- **Verified:** Both servers start successfully and serve on their respective ports.

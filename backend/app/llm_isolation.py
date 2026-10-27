@@ -91,9 +91,13 @@ def check_session_context(db: DB, session_id: str) -> dict:
         response = attempt["response"] or ""
         for prior_sid, sig in prior_signatures:
             if sig in prompt:
-                violations.append(f"Prompt in attempt {attempt['id'][:8]} contains text from prior session {prior_sid[:8]}")
+                violations.append(
+                    f"Prompt in attempt {attempt['id'][:8]} contains text from prior session {prior_sid[:8]}"
+                )
             if sig in response and not any(excl in sig for excl in SAFE_EXCLUSIONS):
-                violations.append(f"Response in attempt {attempt['id'][:8]} contains text from prior session {prior_sid[:8]}")
+                violations.append(
+                    f"Response in attempt {attempt['id'][:8]} contains text from prior session {prior_sid[:8]}"
+                )
 
     status = "pass" if not violations else "fail"
     detail = (

@@ -18,24 +18,51 @@ if (-not (Test-Path ".env")) {
     Pop-Location
 }
 
-# 2. Start stack
-Write-Host "[*] Launching hardened multi-container stack (isolated networks)..." -ForegroundColor Yellow
-docker compose up -d --build --wait --wait-timeout 120
+# 2. Check Docker daemon availability
+Write-Host "[*] Checking Docker Desktop status..." -ForegroundColor Yellow
+$dockerOk = $false
+try {
+    $null = docker info 2>&1
+    if ($LASTEXITCODE -eq 0) { $dockerOk = $true }
+} catch {
+    $dockerOk = $false
+}
 
-# 3. Wait for Control Plane
-Write-Host "[*] Waiting for Control Plane health readiness..." -ForegroundColor Yellow
-$healthy = $false
-for ($i = 0; $i -lt 30; $i++) {
-    try {
-        $res = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/meta" -Method Get -TimeoutSec 2
-        if ($res.stages) {
-            $healthy = $true
-            Write-Host "[+] Control Plane is online and healthy." -ForegroundColor Green
-            break
+if ($dockerOk) {
+    Write-Host "[*] Docker Engine detected. Launching hardened multi-container stack..." -ForegroundColor Yellow
+    docker compose up -d --build --wait --wait-timeout 120
+
+    # 3. Wait for Control Plane
+    Write-Host "[*] Waiting for Control Plane health readiness..." -ForegroundColor Yellow
+    $healthy = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        try {
+            $res = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/meta" -Method Get -TimeoutSec 2
+            if ($res.stages) {
+                $healthy = $true
+                Write-Host "[+] Control Plane is online and healthy." -ForegroundColor Green
+                break
+            }
+        } catch {
+            Start-Sleep -Seconds 1
         }
-    } catch {
-        Start-Sleep -Seconds 1
     }
+} else {
+    Write-Host "[!] Docker Desktop engine is not running on this machine." -ForegroundColor Yellow
+    Write-Host "[!] Note: You do NOT need any cloud/external API keys to run Bayora." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "To run with Docker:" -ForegroundColor Cyan
+    Write-Host "  1. Start the Docker Desktop app from Windows Start Menu." -ForegroundColor White
+    Write-Host "  2. Once Docker Desktop displays 'Engine running', re-run .\scripts\demo.ps1" -ForegroundColor White
+    Write-Host ""
+    Write-Host "To run WITHOUT Docker (instant local dev mode, zero setup):" -ForegroundColor Cyan
+    Write-Host "  Run: .\scripts\demo_local.ps1" -ForegroundColor Green
+    Write-Host "  Or manually in two terminals:" -ForegroundColor White
+    Write-Host "    Terminal 1 (Backend):  cd backend; python -m uv run uvicorn app.main:app --host 127.0.0.1 --port 8000" -ForegroundColor Gray
+    Write-Host "    Terminal 2 (Frontend): cd frontend; npm run dev" -ForegroundColor Gray
+    Write-Host "    Then open:             http://localhost:5173" -ForegroundColor Green
+    Write-Host ""
+    return
 }
 
 # 4. Trigger one full test run

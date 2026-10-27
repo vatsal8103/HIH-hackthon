@@ -40,6 +40,30 @@ PROBE_TARGETS = [
     ("egress", "192.0.2.1", 80),  # TEST-NET-1 (RFC 5737): never a real host
 ]
 
+
+def probe_targets() -> list[tuple[str, str, int]]:
+    """Probe targets dynamically determined by runtime deployment mode."""
+    mode = os.environ.get("BAYORA_MODE")
+    if mode == "local-process":
+        cp_port = int(os.environ.get("BAYORA_CP_PORT", "8000"))
+        witness_port = int(os.environ.get("BAYORA_WITNESS_PORT", "8001"))
+        red_port = int(os.environ.get("BAYORA_RED_PORT", "8002"))
+        blue_port = int(os.environ.get("BAYORA_BLUE_PORT", "8003"))
+        target_port = int(os.environ.get("BAYORA_TARGET_PORT", "8004"))
+        return [
+            ("control-plane", "127.0.0.1", cp_port),
+            ("database", "127.0.0.1", 5432),
+            ("red-agent", "127.0.0.1", red_port),
+            ("blue-agent", "127.0.0.1", blue_port),
+            ("target", "127.0.0.1", target_port),
+            ("witness", "127.0.0.1", witness_port),
+            ("ollama-proxy", "127.0.0.1", 11434),
+            ("groq-proxy", "127.0.0.1", 8080),
+            ("egress", "192.0.2.1", 80),
+        ]
+    return PROBE_TARGETS
+
+
 # The permission self-probe: every protected resource, always against SENTINEL, so an
 # allowed request ends in 404 and nothing is ever written. Mirrors app.isolation.RESOURCES.
 PERMISSION_PROBES = [
@@ -137,34 +161,91 @@ def connect(host: str, port: int, timeout: float = 1.5) -> str:
 
 
 def process_security() -> dict:
-    """Controls observed from inside this process. Linux only; elsewhere reported as unsupported."""
+    """Controls observed from inside this process. Linux/container details when available, plus process info."""
+    from app import sandbox
+
+    caps = sandbox.detect_os_capabilities()
+    mode = os.environ.get("BAYORA_MODE", "in-process")
     status_file = Path("/proc/self/status")
     if not status_file.exists():
-        return {"supported": False}
+        return {
+            "supported": mode == "local-process",
+            "mode": mode,
+            "pid": os.getpid(),
+            "uid": os.getuid() if hasattr(os, "getuid") else None,
+            "cap_eff": "0",
+            "no_new_privs": False,
+            "rootfs_read_only": False,
+            "docker_socket": False,
+            "sandbox": caps["sandbox_tool"],
+            "sandbox_strength": caps["strength"],
+            "sandbox_summary": caps["summary"],
+        }
     fields = dict(line.split(":", 1) for line in status_file.read_text().splitlines() if ":" in line)
-    probe = Path("/.bayora-write-probe")
+    probe_file = Path("/.bayora-write-probe")
     try:
-        probe.write_text("x")
-        probe.unlink()
+        probe_file.write_text("x")
+        probe_file.unlink()
         read_only = False
     except OSError:
         read_only = True
     return {
         "supported": True,
-        "uid": os.getuid(),
+        "mode": mode,
+        "pid": os.getpid(),
+        "uid": os.getuid() if hasattr(os, "getuid") else None,
         "cap_eff": fields.get("CapEff", "").strip(),
         "no_new_privs": fields.get("NoNewPrivs", "").strip() == "1",
         "rootfs_read_only": read_only,
         "docker_socket": Path("/var/run/docker.sock").exists(),
+        "sandbox": caps["sandbox_tool"],
+        "sandbox_strength": caps["strength"],
+        "sandbox_summary": caps["summary"],
     }
 
 
+def check_peer_barrier(name: str, host: str, port: int, tcp_outcome: str) -> str:
+    """Label isolation boundary honestly:
+    - 'blocked by OS': connection refused, unreachable, timeout, or DNS failure
+    - 'blocked by authentication only': TCP connection accepted on loopback, but dispatch
+      without a valid control-plane grant is rejected (HTTP 401/403)
+    - 'reachable': endpoint responds without authentication (unauthorized cross-role path)
+    - 'authorized path': expected permitted link to control-plane
+    """
+    if tcp_outcome != "connected":
+        return "blocked by OS"
+    if name == "control-plane":
+        return "authorized path"
+    if name in ("red-agent", "blue-agent", "target", "witness"):
+        try:
+            with httpx.Client(base_url=f"http://{host}:{port}", timeout=0.8) as client:
+                resp = client.post("/v1/act", json={})
+                if resp.status_code in (401, 403, 404, 405, 422):
+                    return "blocked by authentication only"
+                if resp.status_code < 400:
+                    return "reachable"
+        except (httpx.HTTPError, OSError):
+            return "blocked by OS"
+        return "blocked by authentication only"
+    return "reachable" if tcp_outcome == "connected" else "blocked by OS"
+
+
 def probe(self_name: str, role: str | None = None, grant: str | None = None) -> dict:
-    reach = [
-        {"name": name, "host": host, "port": port, "outcome": connect(host, port)}
-        for name, host, port in PROBE_TARGETS
-        if name != self_name
-    ]
+    reach = []
+    for name, host, port in probe_targets():
+        if name == self_name:
+            continue
+        outcome = connect(host, port)
+        barrier = check_peer_barrier(name, host, port, outcome)
+        reach.append(
+            {
+                "name": name,
+                "host": host,
+                "port": port,
+                "outcome": outcome,
+                "barrier": barrier,
+            }
+        )
     report = {"agent": self_name, "reachability": reach, "security": process_security()}
     if role and grant:
         report["permissions"] = permission_probe(role, grant)

@@ -88,10 +88,51 @@ Create test → Red Team attack → Target response → Safety evaluation → Bl
 | Resource fairness & response-time quantization (`ISO-12`) | **Partial** (dev + Docker) | 10ms padding middleware; `evaluate_target_fairness`; container limits; host core pinning planned |
 | Public safety benchmark attacks (Gandalf, JailbreakBench, AdvBench, HarmBench) | **Implemented** | 25 imported cases with sources/licenses; `scripts/import_attacks.py`; library UI filters; unit tests |
 | Architecture threat model & residual risk reporting | **Implemented** | `docs/THREAT_MODEL.md`; `GET /api/threat-model`; Risk reports tabbed UI; unit tests |
+| Real process isolation without Docker (`BAYORA_MODE=local-process`) | **Implemented** (local-process) | 6 independent OS processes on 127.0.0.1; per-role secret directories (`.run/`, mode 600); Ed25519 request signatures; unit tests (`test_local_process_isolation.py`) |
 | Target model | **Simulated** by default; **live** model via Ollama (local) or Groq (hosted) when configured (Live AI mode) | Provider tests with mocked Ollama and Groq; real two-attack runs in Docker through `ollama-proxy` and `groq-proxy` |
 | Blue Team agent | **Simulated**: a fixed playbook from violated criterion to rule | |
 | Per-user operator identity; shared jti cache across API restarts | **Planned** | |
 | Kernel-level sandbox (gVisor, microVM) | **Planned**: containers share the Docker VM kernel | |
+
+## Run without Docker (Real OS Process Isolation)
+
+When Docker is unavailable, Bayora runs with **real OS process isolation** across 6 distinct processes bound strictly to loopback (`127.0.0.1`):
+- **Witness Service** (`http://127.0.0.1:8001`): Dedicated process with independent `.run/witness/data` storage.
+- **Red Agent** (`http://127.0.0.1:8002`): Holds only `BAYORA_RED_SIGNING_KEY` and CP public key in `.run/red/env.json`.
+- **Blue Agent** (`http://127.0.0.1:8003`): Holds only `BAYORA_BLUE_SIGNING_KEY` and CP public key in `.run/blue/env.json`.
+- **Target Agent** (`http://127.0.0.1:8004`): Holds **no signing key**, only CP public key in `.run/target/env.json`.
+- **Control Plane** (`http://127.0.0.1:8000`): Holds CP signing key and role public keys only.
+- **Frontend UI** (`http://localhost:5173`): Vite dev proxy injects the operator token server-side.
+
+### One-Command Start:
+**Windows PowerShell:**
+```powershell
+.\scripts\run_local.ps1
+```
+
+**macOS / Linux:**
+```bash
+bash scripts/run_local.sh
+```
+
+### Standalone Offline Audit Verification & Export:
+Audit records can be independently verified without running the FastAPI server:
+```bash
+python scripts/verify_audit.py --db backend/bayora.db --export evidence_bundle.json
+```
+Options:
+- `--db <path>`: Path to SQLite database (default: `backend/bayora.db`).
+- `--witness-log <path>`: Cross-check against external witness `checkpoints.jsonl`.
+- `--export <path>`: Export full cryptographic evidence bundle as portable JSON.
+- Exits with return code 0 on verified integrity; exits with return code 1 on tamper detection.
+
+### Optional Host OS Hardening Scripts:
+- **Host Firewall (Loopback Packet Isolation):**
+  - Linux iptables: `bash scripts/setup_firewall.sh`
+  - Windows NetFirewall: `powershell -ExecutionPolicy Bypass -File scripts\setup_firewall.ps1`
+- **Dedicated Unprivileged Service Accounts:**
+  - Linux: `bash scripts/setup_users.sh`
+  - Windows: `powershell -ExecutionPolicy Bypass -File scripts\setup_users.ps1`
 
 ## Run with Docker (isolated roles)
 

@@ -241,7 +241,18 @@ export interface Meta {
   playbook: Record<string, string>;
   controls: { name: string; status: "implemented" | "simulated" | "planned" | "unknown"; detail: string }[];
   permissions: Record<string, string[]>;
-  deployment: { roles: Record<string, RoleMode>; checkpoint: "witness" | "not-configured" };
+  deployment: {
+    roles: Record<string, RoleMode>;
+    checkpoint: "witness" | "not-configured";
+    mode?: "local-process" | "in-process" | "docker";
+    os_isolation?: {
+      platform: string;
+      sandbox: string;
+      strength: string;
+      summary: string;
+      details: string[];
+    };
+  };
   /** What answers as the target, as reported by the process that runs it. */
   target: TargetInfo;
   storage: string;

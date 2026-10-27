@@ -763,4 +763,3 @@ def test_resource_fairness_and_timing_padding_compose():
         assert host["PidsLimit"] == 128
         assert host["Memory"] == 256 * 1024 * 1024
         assert host["NanoCpus"] == 500_000_000
-

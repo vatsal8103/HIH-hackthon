@@ -32,6 +32,32 @@ _History: the baseline on the same date had no code. The first vertical slice ra
 
 **Dev** (two local processes): Vite proxy → API. Red, Blue and Target run inside the API process, and there is no witness unless `BAYORA_WITNESS_URL` is set. The UI shows "Roles: in-process" and "Anchor: none", and the isolation checks for network and containers are `simulated` or `planned`.
 
+**Local Process Isolation (`BAYORA_MODE=local-process`, `scripts/run_local.sh` or `.ps1`)**:
+Runs 6 independent OS processes bound strictly to `127.0.0.1` without Docker.
+- `cp` (Control Plane on `:8000`): Holds CP signing key + Red/Blue public verification keys.
+- `witness` (Independent Witness on `:8001`): Holds its own append-only log under `.run/witness/`.
+- `red` (Red Team Agent on `:8002`): Holds only Red private signing key; accepts dispatches from CP with valid grant; signs all API calls back to `:8000`.
+- `blue` (Blue Team Agent on `:8003`): Holds only Blue private signing key; accepts dispatches from CP with valid grant; signs all API calls back to `:8000`.
+- `target` (Target Model Agent on `:8004`): Holds ONLY CP public verification keys (zero private signing keys); accepts dispatches from CP; evaluates attacks against deterministic or live models; initiates zero outbound API calls.
+- `frontend` (Vite dev server on `:5173`): Serves UI and proxies `/api` to `:8000`.
+
+Isolation boundary:
+- Scrubbed environments: Each agent process starts with cleared parent environment variables and reads strictly from isolated `.run/<role>/env.json`.
+- File system: `.run/<role>` folders with strict POSIX permissions (`0o700` dirs, `0o600` secret files).
+- Network boundary: Bound strictly to loopback (`127.0.0.1`). Cross-role requests without a CP-signed Ed25519 grant are cryptographically rejected (401/403).
+- Failure boundary: Agent crashes or deadlocks fail loudly with 502 Bad Gateway and roll back the stage transaction; no fallback to in-process execution is permitted.
+
+```mermaid
+flowchart LR
+  B[Browser :5173] -- /api proxy --> API[Control Plane :8000<br/>CP signing key, Red/Blue pubkeys]
+  API -- HTTP + CP Grant --> R[Red Agent :8002<br/>Red private key]
+  API -- HTTP + CP Grant --> BL[Blue Agent :8003<br/>Blue private key]
+  API -- HTTP + CP Grant --> T[Target Agent :8004<br/>CP pubkey only, ZERO signing keys]
+  API -- Checkpoint POST --> W[Witness :8001<br/>.run/witness log]
+  R -. signed API calls .-> API
+  BL -. signed API calls .-> API
+```
+
 **Docker** (`docker-compose.yml`): eight long-running services plus the one-shot `migrate` job, one network per path. Every network except `public` is `internal: true`, with no outside route.
 
 ```mermaid
@@ -377,8 +403,9 @@ _From the visual refinement pass, except for item 1's checkpoint banner, which t
    - **Target inbox:** no answered prompts, and only the keys `attempt_id`, `phase` and `prompt`.
 4. `audit.verify(db)` → ISO-05.
 5. **`role_runtime_checks()`:**
+   - In `local-process` mode (`BAYORA_MODE=local-process`): detects host OS primitives (`app.sandbox.detect_os_capabilities()`). Agents run `check_peer_barrier()` which probes TCP and unauthenticated dispatches, categorizing each path honestly as "blocked by OS", "blocked by authentication only", or "reachable" (violation). ISO-06 tallies these empirical counts and passes if no unauthorized routes exist. ISO-07 reports detected isolation strength ("OS-level" via bubblewrap/firejail or "process-level" with Windows Job Object containment/scrubbed env) with active PIDs and 600/700 secret permissions.
    - If any role is in-process: ISO-06 is `simulated` (the declared `NETWORK_MODEL`, naming the in-process roles) and ISO-07 is `planned` / `not-run`.
-   - If all three agents are configured: for each role, `call_agent(role, "/v1/probe", {})`. The agent probes its fixed `PROBE_TARGETS` (compose service names plus TEST-NET-1 `192.0.2.1`) with a 1.5 s TCP connect, and reads `/proc/self/status` (uid, CapEff, NoNewPrivs), a write probe on `/`, and whether `/var/run/docker.sock` exists.
+   - If all three agents are configured (Docker mode): for each role, `call_agent(role, "/v1/probe", {})`. The agent probes its fixed `PROBE_TARGETS` (compose service names plus TEST-NET-1 `192.0.2.1`) with a 1.5 s TCP connect, and reads `/proc/self/status` (uid, CapEff, NoNewPrivs), a write probe on `/`, and whether `/var/run/docker.sock` exists.
    - `evaluate_probe` compares reachability with `NETWORK_POLICY` (each role → `control-plane` only; "refused" counts as reachable) → ISO-06 `network`. `ollama-proxy` is in every agent's probe list: Red and Blue reaching it is a violation; for the target it is an optional path (`OPTIONAL_PATHS`), present only in Live AI mode. `evaluate_security` → ISO-07 `configured`. An agent that doesn't answer fails both checks: fail closed.
 6. **`checkpoint_check()`** → ISO-08: `enforced` when a witness is configured (`checkpoint.verify`), else `planned`.
 7. **`llm_isolation.run_llm_checks()`:**
@@ -442,6 +469,12 @@ The agents' probe results are self-reported by Bayora's own code. Independent pr
    It returns `status`, `checkpoints`, `anchored_seq` (the head in force), `head_seq`, `unanchored_events` and `superseded`. A mismatch, or an unreachable configured witness, sets `ok = false`.
 4. **Tamper simulation** (`POST /api/audit/tamper-test`): mutates an in-memory copy. With a witness configured, `checkpoint.compare(tampered_chain, records)` is attached as `checkpoint.detected`. An unreachable or malformed witness → 502.
 5. **Malformed witness replies:** `publish` accepts only a record with an integer `seq`, string `head_hash` and integer `index`; anything else → `failed`. `fetch()` accepts only `{records: [records], integrity: {ok: bool}}`; anything else raises `RemoteError`, so verify reports `unavailable` and `ok: false`, and the report records `unavailable`. No committed request returns 500 because of the witness.
+6. **Standalone offline verification & evidence export** (`scripts/verify_audit.py`):
+   - Opens the SQLite database in URI read-only mode (`mode=ro`) without running the backend server.
+   - Recomputes SHA-256 over canonical JSON across `HASHED_FIELDS` for all rows, verifying sequence monotonicity, hash link continuity, and genesis anchoring.
+   - Cross-checks evidence digests against raw `attempts` rows (prompts, responses, verdicts).
+   - Validates alignment against external witness checkpoint logs (`--witness-log`).
+   - Exports portable, self-contained JSON evidence bundles (`--export evidence_bundle.json`) for outside auditors.
 
 ### 5.3 Crash and recovery
 
@@ -477,6 +510,7 @@ flowchart TD
    - Cross-boundary detection in `auth.require()` triggers `CROSS_BOUNDARY_ACCESS` when Red accesses `/api/blue/` or Blue accesses `/api/red/`.
    - Signed token verification in `auth._signed()` triggers `INVALID_SIGNATURE`, `TOKEN_REPLAYED`, or `TOKEN_EXPIRED`.
    - Request burst tracking in `monitor.record_role_request()` triggers `RATE_EXCEEDED` if a single role exceeds 30 requests in 5 seconds.
+   - Remote agent process crashes or unreachable network errors handled in `@app.exception_handler(remote.RemoteError)` trigger `PROCESS_CRASH` before returning HTTP 502.
    - Interactive verification via `POST /api/alerts/demo` triggers `DEMO_VIOLATION` for live demonstrations.
 2. **Strict Redaction Guarantee:**
    - Stored alert schema records only `id`, `ts`, `role`, `route`, `reason`, and coarse metadata (`status_code`, `method`, `via`).
@@ -517,10 +551,12 @@ flowchart LR
    - Control plane routes for Red and Blue (`/api/red/*`, `/api/blue/*`) pass through `timing_mitigation_middleware`.
    - `async_pad_response_time` quantizes elapsed request duration up to discrete buckets (10ms quantum default).
    - Returns header `X-Timing-Protection: quantized`, masking internal execution variance.
-3. **Container Resource Limits:**
+3. **Container & Process Resource Limits:**
    - Docker Compose enforces `pids_limit: 128`, `mem_limit: 256m`, and `cpus: 0.5` on all role containers (`x-hardened` anchor). Verified by `test_resource_fairness_and_timing_padding_compose()` in `tests_compose/test_stack.py`.
+   - On Windows in local-process mode, `sandbox.setup_windows_job_object()` assigns child processes to Job Objects for process-tree containment.
+   - In unconstrained local-process mode without Job Objects or cgroups, `fairness.evaluate_container_limits()` honestly reports `enforced: False` and `enforcement_layer: "not enforced (unconstrained host processes)"`.
 4. **Isolation Check `ISO-12`:**
-   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container limits.
+   - Executed as an enforced check during `isolation.run_checks()`, certifying fairness bounds, response quantization, and container/process limits with the active enforcement layer clearly disclosed.
 5. **Honest Residual Risk Documentation:**
    - Pipeline reports and isolation details explicitly document that timing side channels are reduced through response-time quantization and container resource limits, but not completely eliminated on shared host hardware.
 

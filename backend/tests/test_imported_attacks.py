@@ -107,3 +107,18 @@ def test_run_creation_with_imported_attacks(client):
     # Advance attack stage
     adv = client.post(f"/api/runs/{run['id']}/advance", headers=auth("operator")).json()
     assert adv["executed"] == "attack"
+
+
+def test_imported_attacks_full_lifecycle(client):
+    from conftest import run_to_completion
+
+    run = run_to_completion(client, ["GD-01", "JB-03", "AB-01"])
+    assert run["stage"] == "report"
+    assert run["next_stage"] is None
+    assert len(run["executed"]) == 7
+    report = client.get(f"/api/runs/{run['id']}", headers=auth("operator")).json()["report"]
+    assert report is not None
+    assert report["counts"]["cases"] == 3
+    assert len(report["cases"]) == 3
+    assert report["audit"]["ok"] is True
+    assert {c["attack_id"] for c in report["cases"]} == {"GD-01", "JB-03", "AB-01"}
